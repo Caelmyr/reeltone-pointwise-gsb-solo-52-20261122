@@ -170,6 +170,14 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .preview-card { width: 115px; overflow-wrap: anywhere; padding: 6px; background: #111c24; border: 1px solid #354850; border-radius: 7px; }
 .preview-card img { display: block; max-height: 145px; }
 .preview-card small { display: block; padding-top: 4px; }
+.trace-list { display: grid; gap: 12px; margin-top: 10px; }
+.trace-card { margin: 0; padding: 12px; }
+.trace-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.trace-card-head strong { font-size: 13px; }
+.trace-score { font: 600 12px var(--mono); color: var(--loader); background: #2a2418; border: 1px solid #5c4a2c; border-radius: 5px; padding: 3px 7px; }
+.trace-card img { width: 100%; display: block; border-radius: 6px; border: 1px solid #3b4f54; }
+.trace-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 9px 0 4px; color: var(--muted); font: 11px var(--mono); }
+#trace-result .box { margin-top: 12px; }
 @media (max-width: 1110px) {
   .workbench { grid-template-columns: minmax(162px,190px) minmax(350px,1fr) minmax(235px,269px); }
   .workspace { padding: 18px 14px 30px; }

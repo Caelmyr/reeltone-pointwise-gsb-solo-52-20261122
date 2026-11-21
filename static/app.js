@@ -6,7 +6,7 @@ import {cueForm, deskPage, packetReady, zipSummary} from './desk.js';
 const state = {
     library:{reels:[]}, reel:null, scan:null, takes:[], proofs:[], workspace:'scan', panel:'recipe', tool:'exposure',
     frame:{start:0,rows:480,tonal:'native',point:null,selection:null}, monitor:{}, listenRows:null, result:null,
-    instrumentContext:null, pairScan:null, desk:null, modalData:null, scanTicket:0,
+    instrumentContext:null, pairScan:null, desk:null, modalData:null, scanTicket:0, traceResult:null,
 };
 
 function drawLibrary() { $('#library').innerHTML = library(state); }
@@ -161,6 +161,47 @@ function batchIntakeModal() {
     modal('批量导入边带扫描',`<p class="panel-note">ZIP 内放最多 14 张 PNG、单页 TIFF 或 JPEG。可附 intake.json 标注来源与走片方向。</p>${form('batch-form',fields,`${submit('预检扫描批次')}${action('commit-batch','确认导入已检查批次')}`)}<div id="intake-result"></div>`);
 }
 
+function fragmentTraceModal() {
+    state.traceResult = null;
+    const reel = state.reel.reel;
+    const fields = field('fragment','局部残片图像','',{type:'file',accept:'image/png,image/tiff,image/jpeg,.tif,.tiff',full:true}) +
+        field('trace_threshold','相似度阈值（越低越宽松）',0.88,{type:'number',min:0.5,max:0.999,step:0.01,full:true});
+    modal('残片溯源查询',
+        `<p class="panel-note">在「${esc(reel.title)}」卷内逐张扫描比对这张残片。残片只用于本次比对，<b>不会作为新扫描归入卷中</b>；比对同时检查上传朝向与上下翻转。结果只按相似度排序，<b>不自动认定原档</b>，齿孔或基准音重复时会列出多个候选供你核对。</p>` +
+        form('trace-form', fields, submit('在本卷内查找')) + '<div id="trace-result"></div>');
+}
+
+const ORIENTATION_TEXT = {native:'上传朝向', reverse_y:'上下翻转'};
+
+function traceResultHTML(body) {
+    const q = body.query;
+    const head = metrics([['残片尺寸',`${fmt(q.width,0)} × ${fmt(q.height,0)}`],['候选位置',body.candidate_count],
+        ['相似度阈值',fmt(body.threshold,2)],['是否归档','否（仅比对）']]);
+    if (!body.candidate_count) {
+        const skipped = body.skipped.length
+            ? `<p class="panel-note status-warning">${body.skipped.length} 张扫描因残片大于原片而跳过：${esc(body.skipped.map(s=>s.title).join('、'))}</p>` : '';
+        return head + `<p class="panel-note status-warning">没有超过阈值的候选。可适当调低相似度阈值，或确认残片是否属于本卷、是否被缩放。</p>${skipped}`;
+    }
+    const cards = body.candidates.map((item, n) => {
+        const c = item.candidate;
+        const [x0,y0,x1,y1] = c.box;
+        return `<article class="box trace-card">
+          <div class="trace-card-head"><strong>候选 ${n+1} · ${esc(item.scan_title)}</strong>
+            <span class="trace-score">NCC ${fmt(c.score,4)}</span></div>
+          ${image(item.plate,`残片与候选 ${n+1} 的并排对照`)}
+          <div class="trace-meta">
+            <span>原片框 列 ${fmt(x0,0)}–${fmt(x1,0)} · 行 ${fmt(y0,0)}–${fmt(y1,0)}</span>
+            <span>朝向：${esc(ORIENTATION_TEXT[c.orientation] || c.orientation)}</span>
+            <span>坐标：${c.coordinate_resolution === 'coarse' ? '粗筛' : '原片像素'}</span>
+          </div>
+          <div class="form-footer">${action('trace-open-scan','回到该候选原片行',{scan:c.scan_id,x:x0,row:y0,x1,y1,orientation:c.orientation},'strong')}</div>
+        </article>`;
+    }).join('');
+    const skipped = body.skipped.length
+        ? `<p class="panel-note">已跳过 ${body.skipped.length} 张比残片更小的扫描。</p>` : '';
+    return head + `<p class="panel-note">${esc(body.interpretation)}</p>${skipped}<div class="trace-list">${cards}</div>`;
+}
+
 function batchSummary(result) {
     const list = result.files.map(item=>[item.path,`${item.metadata.width} × ${item.metadata.height}`,item.byte_duplicate ? '已在卷内' : item.duplicates_inside_batch.length ? '本批重复' : '待导入']);
     return metrics([['准备导入',result.ready_to_add],['扫描成员',result.entries]])+listTable(['文件','原片像素','预检'],list)+`<div class="preview-grid">${result.files.filter(item=>item.preview).map(item=>`<div class="preview-card">${image(item.preview,item.title)}<small>${esc(item.title)}</small></div>`).join('')}</div>`;
@@ -260,6 +301,7 @@ const commands = {
     'workspace':async data=>{state.workspace=data.view;drawWorkspace();if(data.view==='desk') await loadDesk();},
     'panel':data=>{state.panel=data.view;drawSettings();},
     'intake':intakeModal,
+    'fragment-trace':fragmentTraceModal,
     'batch-intake':batchIntakeModal,
     'commit-batch':()=>batchRead($('#batch-form'),'commit'),
     'intake-preflight':async ()=>{
@@ -306,6 +348,16 @@ const commands = {
     },
     'take-to-source':originalJump,
     'open-native':originalJump,
+    'trace-open-scan':data => {
+        closeModal();
+        return openScan(data.scan, null, {workspace:true}).then(() => {
+            windowStart(Number(data.row || 0));
+            state.frame.selection = [Number(data.x), Number(data.row), Number(data.x1), Number(data.y1)];
+            drawWorkspace();
+            onFilmSelection();
+            notice(`已打开候选原片，定位框 列 ${Number(data.x)}–${Number(data.x1)} · 行 ${Number(data.row)}–${Number(data.y1)}（候选朝向：${ORIENTATION_TEXT[data.orientation] || data.orientation}）。请自行核对，系统未认定其为原档。`);
+        });
+    },
     'apply-track':data=>{state.panel='recipe';drawSettings();$('#recipe-form').elements.a0.value=data.a;$('#recipe-form').elements.a1.value=data.b;notice('已将候选填入配方。核对列范围后保存。');},
     'use-references':()=>{const targets=state.instrumentContext?.response.reading;if(!targets?.usable) return;state.panel='recipe';drawSettings();$('#recipe-form').elements.black.value=targets.black;$('#recipe-form').elements.white.value=targets.white;},
     'retain-instrument':()=>{
@@ -359,6 +411,13 @@ const submitters = {
         notice(answer.duplicate?'扫描在本卷已有记录，已打开原条目。':'已保存原始扫描。');
     },
     'batch-form':node=>batchRead(node,'preflight'),
+    'trace-form':async node=>{
+        if (!node.reportValidity()) return;
+        const reelId = state.reel.reel.id;
+        const answer = await post(reelURL(reelId,'/fragment-trace'), new FormData(node));
+        state.traceResult = answer;
+        $('#trace-result').innerHTML = traceResultHTML(answer);
+    },
     'window-form':node=>{state.frame.rows=number(node,'rows');closeModal();windowStart(number(node,'start'));drawSettings();},
     'recipe-form':async node=>{
         const scan=state.scan;

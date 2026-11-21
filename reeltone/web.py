@@ -11,7 +11,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from . import __version__
 from .audition import MAX_MONITOR_SECONDS, RATES
 from .bench import load_material, make_reading, render_audition, restore_settings, save_settings
-from .contracts import flag, integer, mapping, option, safe_filename, shipment_stem, split_rows, text
+from .contracts import flag, integer, mapping, option, real, safe_filename, shipment_stem, split_rows, text
 from .contact import make_contact
 from .cues import cue_coverage
 from .demo import seed_library
@@ -26,6 +26,7 @@ from .replay import retained_replay
 from .review import build_packet, current_proof_properties, current_take_properties, restore_view, save_cue, save_marker
 from .source_info import inspect_source
 from .store import Catalog
+from .trace import trace_plate, trace_reel
 from .transfer_review import export_review, from_catalog
 from .visual import source_overview, source_tile
 
@@ -159,6 +160,24 @@ def library_routes(app, catalog, gate):
             if item.get("preview") is not None:
                 item["preview"] = encode_data(item["preview"], "image/png")
         return jsonify(result), 201 if result.get("added_count") else 200
+
+    @app.post("/api/reels/<reel_id>/fragment-trace")
+    def fragment_trace(reel_id):
+        catalog.get_reel(reel_id)
+        content, name = read_upload("fragment", FILE_BYTES)
+        raw_threshold = request.form.get("trace_threshold", request.form.get("threshold", 0.88))
+        threshold = real(raw_threshold, "相似阈值", 0.5, 0.999)
+        with gate.work():
+            fragment_raster = read_scan(content, name)
+            matches, skipped = trace_reel(catalog, reel_id, fragment_raster.intensity, threshold)
+        for item in matches:
+            item["plate"] = encode_data(item["plate"], "image/png")
+        return jsonify(query={"filename": fragment_raster.filename, "width": fragment_raster.width,
+                              "height": fragment_raster.height, "sha256": fragment_raster.digest,
+                              "archived": False},
+                       threshold=threshold, candidate_count=len(matches),
+                       interpretation="结果仅按相似度排序，不自动认定原档；齿孔或基准音重复时多个候选都应人工核对。",
+                       candidates=matches, skipped=skipped)
 
 
 def source_routes(app, catalog, gate):

@@ -23,7 +23,7 @@ export function library(state) {
     const here = state.scan?.scan?.id;
     const choices = state.library.reels.map(item => `<button type="button" class="lib-entry" data-action="reel" data-id="${item.id}" aria-current="${item.id === reel?.id}"><span>${item.synthetic ? '<span class="type-dot" aria-label="合成素材">●</span> ' : ''}${esc(item.title)}</span><small class="lib-meta">${esc(item.gauge)} · ${fmt(item.scan_count,0)} 张扫描</small></button>`).join('');
     const scans = (state.reel?.scans || []).map((item,n) => `<button type="button" class="lib-entry" data-action="scan" data-id="${item.id}" aria-current="${item.id === here}"><span><span class="scan-index">${String(n+1).padStart(2,'0')}</span>${esc(item.title)}</span><small class="lib-meta">${fmt(item.metadata.height,0)} 行 · ${item.metadata.bit_depth} bit</small></button>`).join('');
-    return `<h2>档案库</h2><div class="library-list">${choices || '<p class="lib-empty">暂无档案卷</p>'}</div>${reel ? `<h3>原始扫描</h3><div class="library-list">${scans || '<p class="lib-empty">本卷还未导入图像</p>'}</div>${action('intake','导入图像',{},'subtle lib-action')}${action('batch-intake','批量导入 ZIP',{},'quiet lib-action')}` : ''}`;
+    return `<h2>档案库</h2><div class="library-list">${choices || '<p class="lib-empty">暂无档案卷</p>'}</div>${reel ? `<h3>原始扫描</h3><div class="library-list">${scans || '<p class="lib-empty">本卷还未导入图像</p>'}</div>${action('fragment-trace','残片溯源查询',{},'subtle lib-action')}${action('intake','导入图像',{},'subtle lib-action')}${action('batch-intake','批量导入 ZIP',{},'quiet lib-action')}` : ''}`;
 }
 
 export function blank(state) {
