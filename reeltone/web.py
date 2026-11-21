@@ -9,19 +9,21 @@ from flask import Flask, Response, jsonify, request, send_file, send_from_direct
 from werkzeug.exceptions import RequestEntityTooLarge
 
 from . import __version__
-from .audition import MAX_MONITOR_SECONDS, RATES
+from .audition import MAX_MONITOR_SECONDS, RATES, wav_bytes
 from .bench import load_material, make_reading, render_audition, restore_settings, save_settings
 from .contracts import flag, integer, mapping, option, safe_filename, shipment_stem, split_rows, text
 from .contact import make_contact
 from .cues import cue_coverage
 from .demo import seed_library
 from .errors import Absent, BenchError, Limit
+from .gallery import save_gallery, verify_gallery
 from .instruments import TOOLS, run_tool
 from .intake_batch import BATCH_BYTES, inspect_upload
 from .listen_pair import retained_pair
 from .packet import MAX_PACKET_BYTES, json_bytes, verify_packet
 from .raster import FILE_BYTES, MAX_HEIGHT, MAX_PIXELS, MAX_WIDTH, query_box, read_scan
 from .recipe import Recipe
+from .redact import parse_feather, parse_spans, render_gallery
 from .replay import retained_replay
 from .review import build_packet, current_proof_properties, current_take_properties, restore_view, save_cue, save_marker
 from .source_info import inspect_source
@@ -31,6 +33,19 @@ from .visual import source_overview, source_tile
 
 
 STATIC = Path(__file__).resolve().parents[1] / "static"
+
+
+def _zip_schema(content):
+    from io import BytesIO
+    from zipfile import ZipFile
+
+    try:
+        with ZipFile(BytesIO(content)) as archive:
+            with archive.open("manifest.json") as stream:
+                import json
+                return json.loads(stream.read(4096)).get("schema")
+    except Exception:
+        return None
 
 
 def json_body():
@@ -247,6 +262,34 @@ def source_routes(app, catalog, gate):
         return jsonify(reading=compiled.manifest, preview=encode_data(compiled.plate, "image/png"),
                        pdf=encode_data(compiled.pdf, "application/pdf"))
 
+    @app.post("/api/scans/<scan_id>/redaction/preview")
+    def redaction_preview(scan_id):
+        data = json_body()
+        with gate.work():
+            material = load_material(catalog, scan_id, data.get("recipe") or None)
+            spans = parse_spans(data, material.height)
+            feather = parse_feather(data)
+            wave, rate, image_png, safety, result, envelope = render_gallery(material, spans, feather,
+                                                                             data.get("monitor", {}))
+            identity = material.identity()
+        return jsonify(safety=safety, spans=[{"rows": [item.y0, item.y1], "label": item.label, "note": item.note}
+                                             for item in spans],
+                       preview=encode_data(image_png, "image/png"),
+                       audio=encode_data(wav_bytes(wave, rate), "audio/wav"),
+                       waveform=envelope, clock=result.clock.as_dict(), parent=identity)
+
+    @app.post("/api/reels/<reel_id>/gallery")
+    def gallery_packet(reel_id):
+        values = json_body()
+        scan_id = values.get("scan")
+        reel = catalog.get_reel(reel_id)
+        scan = catalog.get_scan(scan_id)
+        if scan["reel_id"] != reel_id:
+            raise Absent("档案卷下的扫描")
+        with gate.work():
+            packet, manifest = save_gallery(catalog, reel_id, scan_id, values)
+        return jsonify(packet=packet, manifest=manifest), 201
+
 
 def analysis_routes(app, catalog, gate):
     @app.post("/api/scans/<scan_id>/audition")
@@ -366,6 +409,10 @@ def review_routes(app, catalog, gate):
     def verify_retained_packet(packet_id):
         with gate.work():
             stored = catalog.get_packet(packet_id, raw=True)
+            if stored["summary"].get("schema") == "reeltone-gallery-v1":
+                result = verify_gallery(stored["zip_data"])
+                result["receipt_matches"] = result["manifest_sha256"] == stored["summary"]["manifest_sha256"]
+                return jsonify(result)
             result = verify_packet(stored["zip_data"])
             result["receipt_matches"] = result["manifest_sha256"] == stored["summary"]["manifest_sha256"]
         return jsonify(result)
@@ -379,6 +426,9 @@ def review_routes(app, catalog, gate):
     def validate_packet():
         content, _ = read_upload("packet", MAX_PACKET_BYTES)
         with gate.work():
+            kind = _zip_schema(content)
+            if kind == "reeltone-gallery-v1":
+                return jsonify(verify_gallery(content))
             return jsonify(verify_packet(content))
 
     @app.get("/api/reels/<reel_id>/readiness")

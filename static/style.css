@@ -165,6 +165,9 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .checklist { display: flex; flex-wrap: wrap; gap: 7px 13px; }
 .box-row { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 5px; width: 100%; }
 .box-row label { min-width: 0; }
+.redact-list { display: grid; gap: 10px; margin: 10px 0; }
+.redact-span { border: 1px solid #3b4d5d; border-radius: 7px; padding: 9px; background: #111a23; display: grid; gap: 8px; }
+.redact-span .box-row { grid-template-columns: repeat(2,minmax(0,1fr)); }
 .export-panel { display: grid; gap: 8px; }
 .preview-grid { display: flex; flex-wrap: wrap; align-items: start; gap: 7px; margin-top: 9px; }
 .preview-card { width: 115px; overflow-wrap: anywhere; padding: 6px; background: #111c24; border: 1px solid #354850; border-radius: 7px; }

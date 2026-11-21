@@ -1,12 +1,13 @@
 import {$, all, action, boxInputs, check, checked, closeModal, dt, esc, field, fmt, form, image, jsonDetails, link, listTable, metrics, modal, notice, number, post, readBox, record, reelURL, request, scanURL, select, shorten, span, submit, textarea, value} from './ui.js';
 import {blank, connectFilm, currentBox, filmPage, filmSpan, library, refreshFilmOverlay, techSummary} from './film.js';
 import {auditStubHistory, extractMonitor, extractRows, instrumentResult, readingDetails, recipeFrom, rowsFields, settingsPanel, soundResult, TABS, TOOL, toolPayload, waveCanvas} from './panels.js';
-import {cueForm, deskPage, packetReady, zipSummary} from './desk.js';
+import {cueForm, deskPage, galleryReady, packetReady, zipSummary} from './desk.js';
 
 const state = {
     library:{reels:[]}, reel:null, scan:null, takes:[], proofs:[], workspace:'scan', panel:'recipe', tool:'exposure',
     frame:{start:0,rows:480,tonal:'native',point:null,selection:null}, monitor:{}, listenRows:null, result:null,
     instrumentContext:null, pairScan:null, desk:null, modalData:null, scanTicket:0,
+    redaction:{spans:[], feather_rows:32, preview:null},
 };
 
 function drawLibrary() { $('#library').innerHTML = library(state); }
@@ -93,6 +94,7 @@ async function openScan(id, recipe = null, {keepPosition = false, workspace = fa
         state.result = null;
         state.instrumentContext = null;
         state.pairScan = null;
+        state.redaction = {spans:[], feather_rows:32, preview:null};
     }
     draw();
 }
@@ -244,6 +246,36 @@ function jumpCue(id, edit) {
     });
 }
 
+function collectRedaction(node) {
+    const spans = state.redaction.spans.map((span,index)=>({
+        rows:[number(node,`rs${index}0`),number(node,`rs${index}1`)],
+        label:value(node,`rslabel${index}`), note:span.note || '',
+    }));
+    state.redaction.feather_rows = number(node,'feather_rows');
+    return {spans, feather_rows:state.redaction.feather_rows};
+}
+
+function redactionPayload(node) {
+    const picked = collectRedaction(node);
+    if (!picked.spans.length) throw Error('先添加至少一个遮盖区间。');
+    return {recipe:state.scan.recipe.id, title:`${state.scan.scan.title} · 阅览遮盖`, ...picked};
+}
+
+async function runRedactionPreview(node) {
+    const payload = redactionPayload(node);
+    payload.monitor = {...{mode:'width',rate:24000,gain_db:6,low_hz:40,high_hz:0,ramp_ms:6,center:'median'},...state.monitor};
+    const answer = await post(scanURL(state.scan.scan.id,'/redaction/preview'),payload);
+    state.redaction.preview = answer;
+    const s = answer.safety;
+    const metricsList = [['遮盖区间',s.span_count],['硬遮盖原片行',fmt(s.held_rows,0)],['含衔接控制行',fmt(s.controlled_rows,0)],
+        ['遮盖内峰值电平',s.max_level_on_held===0 ? '0（静音）' : s.max_level_on_held],['输出帧数',fmt(s.output_frames,0)]];
+    $('#redact-result').innerHTML = `<article class="box"><h2>遮盖预览</h2>${metrics(metricsList)}
+        <p class="panel-note ${s.max_level_on_held===0?'status-good':'status-error'}">遮盖行内监听样本严格为零；总帧数与未遮盖全片监听一致，行号和播放时间保持原位。</p>
+        <div class="inspect-media"><img src="${esc(answer.preview)}" alt="处理后的遮盖边带图"></div>
+        <audio controls preload="metadata" src="${esc(answer.audio)}" style="width:100%"></audio>
+        <div class="form-footer">${link(answer.audio,'试听遮盖监听 WAV',{download:'gallery-preview.wav'})}</div>${jsonDetails(answer.safety,'遮盖安全读数')}</article>`;
+}
+
 const commands = {
     'load-demo':async () => {
         const response=await post('/api/training');
@@ -323,6 +355,32 @@ const commands = {
         state.modalData={take:data.id};modal('复算已存监听',form('replay-form',select('recipe','复算版本',[['retained','保存监听时的配方'],['current','当前最新配方']],'retained',true)+check('fades','略过首尾渐变',false,true)+field('tolerance','样本差异告警阈值',0.002,{type:'number',min:.00001,max:.2,step:.00001,full:true}),submit('复算并核对')));
     },
     'new-cue':()=>{state.modalData={cue:null};modal('添加审听标记',cueForm(state));},
+    'redact-add':()=>{
+        const form=$('#redact-form');
+        if (form) collectRedaction(form);
+        if (state.redaction.spans.length>=20) throw Error('最多 20 个遮盖区间。');
+        const h=state.scan.scan.metadata.height;
+        state.redaction.spans.push({rows:[Math.floor(h*0.4),Math.floor(h*0.45)],label:`遮盖区间 ${state.redaction.spans.length+1}`,note:''});
+        drawSettings();
+    },
+    'redact-remove':data=>{collectRedaction($('#redact-form'));state.redaction.spans.splice(Number(data.n),1);drawSettings();},
+    'redact-pick':data=>{
+        if (!state.frame.selection) throw Error('先在原片上框选一段。');
+        collectRedaction($('#redact-form'));
+        state.redaction.spans[Number(data.n)].rows=[state.frame.selection[1],state.frame.selection[3]];
+        drawSettings();
+    },
+    'redact-preview':()=>runRedactionPreview($('#redact-form')),
+    'redact-export':async ()=>{
+        const node=$('#redact-form');
+        const payload = redactionPayload(node);
+        payload.monitor = {...{mode:'width',rate:24000,gain_db:6,low_hz:40,high_hz:0,ramp_ms:6,center:'median'},...state.monitor};
+        const reelId=state.reel.reel.id;
+        const answer=await post(reelURL(reelId,'/gallery'),{...payload,scan:state.scan.scan.id});
+        state.reel=await request(reelURL(reelId));
+        modal('阅览 ZIP 已生成',galleryReady(answer.packet,answer.manifest));
+        notice('阅览包只含处理后的边带图、监听和行区间说明。');
+    },
     'edit-cue':data=>jumpCue(data.id,true), 'cue-view':data=>jumpCue(data.id,false),
     'view-readiness':()=>modal('档案卷覆盖图',image(reelURL(state.reel.reel.id,'/readiness/png'),'审听与原片扫描范围覆盖')),
     'item-add':()=>{updatePacketForm();if(state.desk.items.length>=12) throw Error('最多可排列 12 份监听。');state.desk.items.push({take:'',cue:'',gap_ms:150});rerenderPlaylist();},

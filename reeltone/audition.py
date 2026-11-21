@@ -118,9 +118,9 @@ def shaping_filter(values, rows_per_second, options):
     return filtered, remarks
 
 
-def retime(filtered, row_rate, output_rate):
+def retime(filtered, row_rate, output_rate, allow_long=False):
     needed = max(1, round(len(filtered) * output_rate / row_rate))
-    if needed > output_rate * MAX_MONITOR_SECONDS:
+    if not allow_long and needed > output_rate * MAX_MONITOR_SECONDS:
         raise BenchError(f"一次试听最多 {MAX_MONITOR_SECONDS} 秒。缩小原片行区间后重试。")
     ratio = Fraction(output_rate / row_rate).limit_denominator(1700)
     if ratio.numerator == ratio.denominator:
@@ -142,12 +142,12 @@ def apply_fade(values, count):
     return values
 
 
-def audition(read: OpticalRead, clock: RowClock, options: Monitor):
+def audition(read: OpticalRead, clock: RowClock, options: Monitor, allow_long=False):
     scan, center = normalize_signal(read, options, clock)
-    if len(scan) / clock.rows_per_second > MAX_MONITOR_SECONDS:
+    if not allow_long and len(scan) / clock.rows_per_second > MAX_MONITOR_SECONDS:
         raise BenchError(f"一次试听最多 {MAX_MONITOR_SECONDS} 秒。缩小原片行区间后重试。")
     filtered, warnings = shaping_filter(scan, clock.rows_per_second, options)
-    formatted = retime(filtered, clock.rows_per_second, options.rate)
+    formatted = retime(filtered, clock.rows_per_second, options.rate, allow_long=allow_long)
     formatted *= 10.0 ** (options.gain_db / 20.0)
     n_ramp = min(len(formatted) // 2, round(options.rate * options.ramp_ms / 1000.0))
     faded = apply_fade(formatted, n_ramp)

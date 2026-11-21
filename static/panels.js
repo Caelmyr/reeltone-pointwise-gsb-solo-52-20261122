@@ -6,7 +6,7 @@ export const TOOL = {
     references:'明暗参照取样', locate:'查找光学读窗', blemish:'局部瑕疵候选', compare:'两张扫描对照',
     sample:'原像素探针', wedge:'阶梯透射标定', splices:'横向接片候选', slit:'读窗截面漂移', pilot:'基准音稳定度',
 };
-export const TABS = {recipe:'配方', read:'监听', tools:'巡检', retained:'记录'};
+export const TABS = {recipe:'配方', read:'监听', redact:'阅览遮盖', tools:'巡检', retained:'记录'};
 const SIGNAL = [['width','透光宽度'],['light','平均扫描亮度']];
 const RATES = [8000,12000,16000,22050,24000,32000,44100,48000].map(n => [n,`${n.toLocaleString()} Hz`]);
 const RATE_FIELDS = [['manual','手动行速'],['perfs','齿孔测量']];
@@ -137,6 +137,23 @@ export function toolPayload(state, node) {
     return out;
 }
 
+function redactPanel(state) {
+    const h = state.scan.scan.metadata.height;
+    const draft = state.redaction;
+    const spanRows = draft.spans.map((span,index)=>`<div class="redact-span" data-span="${index}">
+        <div class="box-row full">${['起始行','停止行'].map((name,n)=>`<label class="field"><span>${name}</span><input name="rs${index}${n}" type="number" min="0" max="${h}" step="1" value="${span.rows[n]}" required></label>`).join('')}</div>
+        <label class="field full"><span>区间说明（馆内核对用，不会写进行区间表的公开备注之外）</span><input name="rslabel${index}" maxlength="90" value="${esc(span.label)}" required></label>
+        <div class="form-footer">${action('redact-pick','采用当前选框行',{n:index},'subtle')}${action('redact-remove','移除区间',{n:index},'quiet')}</div>
+    </div>`).join('');
+    const controls = `<p class="panel-note">按原片行圈出暂不公开的片段。遮盖不抽行：行号与播放时间保持原位，仅把对应画面和声音替换为不可逆的平顺内容。馆内原图和现有监听不受影响。</p>
+        <label class="field full"><span>衔接平顺行数（遮盖两侧各渐隐渐现的行数）</span><input name="feather_rows" type="number" min="0" max="600" step="1" value="${draft.feather_rows}"></label>
+        <div id="redact-spans" class="redact-list">${spanRows || '<p class="panel-note">还没有遮盖区间。在图上框选后点“采用选框行”，或直接添加。</p>'}</div>
+        <div class="form-footer">${action('redact-add','添加遮盖区间')}${action('redact-preview','预览图与监听',{},'strong')}</div>`;
+    return `<section class="panel"><h2>阅览遮盖</h2><form id="redact-form">${controls}</form>
+        <div class="form-footer">${action('redact-export','导出阅览 ZIP',{},'strong')}</div>
+        <div id="redact-result"></div></section>`;
+}
+
 function toolPanel(state) {
     const selectTool = select('tool','巡检工具',Object.entries(TOOL),state.tool,true);
     const instruction = {compare:'分别指定两张扫描的对应原片范围。',wedge:'在已知透射率的参考片上分别选择三阶均匀区域。',pilot:'选择含有已知频率的参考声段。',splices:'可选取与声轨分开的片边，查找有横向支持的明暗突变。'};
@@ -154,7 +171,7 @@ function retention(state) {
 export function settingsPanel(state) {
     if (!state.scan) return '';
     const tablist = Object.entries(TABS).map(([id,title])=>`<button type="button" data-action="panel" data-view="${id}" role="tab" aria-selected="${state.panel===id}" aria-controls="panel-inside">${title}</button>`).join('');
-    const panels = {recipe:recipePanel,read:readPanel,tools:toolPanel,retained:retention};
+    const panels = {recipe:recipePanel,read:readPanel,redact:redactPanel,tools:toolPanel,retained:retention};
     return `<div class="panel-tabs" role="tablist" aria-label="读片台工具">${tablist}</div><div id="panel-inside" role="tabpanel">${panels[state.panel](state)}</div>`;
 }
 

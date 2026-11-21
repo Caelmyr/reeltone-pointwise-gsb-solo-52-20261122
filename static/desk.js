@@ -76,17 +76,33 @@ function packBuilder(state) {
     return `<section class="box full"><h2>制作审听交付包</h2><form id="packet-form">${header}${items}${evidence}<div class="form-footer">${submit('保存审听交付包')}</div></form></section>`;
 }
 
+function galleryPackets(state) {
+    const list = state.reel.packets.filter(packet=>packet.summary.schema==='reeltone-gallery-v1').map(packet=>
+        record(packet.title,`${packet.summary.span_count} 个遮盖区间 · ${fmt(packet.summary.held_rows,0)} 行硬遮盖 · ${fmt(packet.summary.bytes/1024)} KiB`,
+            `${action('verify-retained','校验',{id:packet.id})}${link(`/api/packets/${packet.id}/download`,'下载阅览 ZIP')}`)).join('');
+    return `<section class="box"><h2>展厅阅览遮盖包</h2><p class="panel-note">包内只有处理后的边带图、遮盖监听和原片行区间说明；不含原始扫描。遮盖区无法从包内还原。</p><div class="data-list">${list || '<p class="panel-note">还未制作阅览遮盖包。在读片台的「阅览遮盖」页签按原片行圈选并导出。</p>'}</div></section>`;
+}
+
 function deliverables(state) {
-    const list = state.reel.packets.map(packet=>record(packet.title,`${packet.summary.clip_count} 个监听片段 · ${packet.summary.images} 幅图像证据 · ${fmt(packet.summary.bytes/1024)} KiB`,
+    const list = state.reel.packets.filter(packet=>packet.summary.schema!=='reeltone-gallery-v1').map(packet=>record(packet.title,`${packet.summary.clip_count} 个监听片段 · ${packet.summary.images} 幅图像证据 · ${fmt(packet.summary.bytes/1024)} KiB`,
         `${action('verify-retained','校验',{id:packet.id})}${link(`/api/packets/${packet.id}/download`,'下载 ZIP')}`)).join('');
-    return `<section class="box"><h2>已交付的包</h2><div class="form-footer">${action('verify-zip','核验收到的 ZIP')}${action('events','档案变更记录')}</div><div class="data-list">${list || '<p class="panel-note">还未制作交付包。</p>'}</div></section>`;
+    return `<section class="box"><h2>已交付的审听包</h2><div class="form-footer">${action('verify-zip','核验收到的 ZIP')}${action('events','档案变更记录')}</div><div class="data-list">${list || '<p class="panel-note">还未制作审听交付包。</p>'}</div></section>`;
 }
 
 export function deskPage(state) {
     if (!state.reel) return blank(state);
     const reel = state.reel.reel;
     if (!state.desk) return '<div class="loading">正在汇总档案卷记录…</div>';
-    return `<header class="scene-header"><div><h1>审听与交付</h1><div class="scene-sub"><span>${esc(reel.title)}</span><span>${esc(reel.accession || '未填入藏号')}</span></div></div><div class="scene-actions">${action('workspace','回到读片台',{view:'scan'})}</div></header><div class="desk-grid">${readinessSummary(state)}${cueRows(state)}${deliverables(state)}${packBuilder(state)}</div>`;
+    return `<header class="scene-header"><div><h1>审听与交付</h1><div class="scene-sub"><span>${esc(reel.title)}</span><span>${esc(reel.accession || '未填入藏号')}</span></div></div><div class="scene-actions">${action('workspace','回到读片台',{view:'scan'})}</div></header><div class="desk-grid">${readinessSummary(state)}${cueRows(state)}${deliverables(state)}${galleryPackets(state)}${packBuilder(state)}</div>`;
+}
+
+export function galleryReady(packet, manifest) {
+    const rows = manifest.redaction.spans.map(item=>[item.label,span(item.rows),item.note || '—']);
+    return metrics([['遮盖区间',manifest.redaction.spans.length],['硬遮盖行',manifest.redaction.hard_held_rows],
+        ['衔接行数',manifest.redaction.feather_rows],['监听帧数',fmt(manifest.audio_frames,0)]])+
+        `<p class="panel-note status-good">遮盖区内图像为基准重建、监听样本严格为零；总时长与原片一致，行号可对照行区间表核对。</p>
+        <div class="form-footer">${link(`/api/packets/${packet.id}/download`,'下载阅览 ZIP',{css:'strong'})}${action('verify-retained','校验内容',{id:packet.id})}</div>`+
+        (rows.length ? listTable(['区间','原片行','说明'],rows) : '');
 }
 
 export function zipSummary(result) {
