@@ -6,7 +6,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from .blemishes import BlemishMap
-from .comparison import Comparison
+from .comparison import WITHHELD, Comparison
 from .geometry import Box, Orientation
 from .raster import byte_preview, encode_image, fitted_preview
 from .spectrum import Spectrum
@@ -213,25 +213,139 @@ def blemish_heat(image, result: BlemishMap, orientation):
     return encode_image(fitted_preview(Image.fromarray(transformed), 900, 1000), "PNG")
 
 
-def luminance_triptych(comparison: Comparison):
-    height, width = comparison.delta.shape
-    width_cap = max(104, min(300, width))
-    height_cap = max(120, min(420, height))
-    tags = ("FIRST SCAN", "SECOND SCAN", "SECOND minus FIRST")
-    raster = Image.new("RGB", (3 * (width_cap + 16) + 20, height_cap + 92), PAGE)
-    draw = ImageDraw.Draw(raster)
-    half = np.clip(comparison.delta * 2.75, -1, 1)
+def _diverging(delta, *, blank=None):
+    half = np.clip(np.nan_to_num(delta, nan=0.0) * 2.75, -1, 1)
     red = 60 + np.maximum(half, 0) * 185
     cyan = 60 + np.maximum(-half, 0) * 178
     green = 58 + np.abs(half) * 93
     palette = np.rint(np.stack((red, green, cyan), axis=-1)).astype(np.uint8)
-    panels = (byte_preview(comparison.left), byte_preview(comparison.right), Image.fromarray(palette))
+    if blank is not None:
+        palette[blank] = (42, 50, 59)
+    return Image.fromarray(palette)
+
+
+def _native_rect(box, selection):
+    box = box if isinstance(box, Box) else Box(*box)
+    left = (box.x0 - selection.x0) / max(1, selection.width)
+    right = (box.x1 - selection.x0) / max(1, selection.width)
+    top = (box.y0 - selection.y0) / max(1, selection.height)
+    bottom = (box.y1 - selection.y0) / max(1, selection.height)
+    return min(left, right), min(top, bottom), max(left, right), max(top, bottom)
+
+
+def _reference_marks(draw, panel_box, selection, references, colors):
+    for (dark, light), color in zip(references, colors):
+        for box in (dark, light):
+            left, top, right, bottom = _native_rect(box, selection)
+            left, right = min(1, max(0, left)), min(1, max(0, right))
+            top, bottom = min(1, max(0, top)), min(1, max(0, bottom))
+            if left == right or top == bottom:
+                continue
+            area = (panel_box[0] + left * (panel_box[2] - panel_box[0]),
+                    panel_box[1] + top * (panel_box[3] - panel_box[1]),
+                    panel_box[0] + right * (panel_box[2] - panel_box[0]),
+                    panel_box[1] + bottom * (panel_box[3] - panel_box[1]))
+            draw.rectangle(area, outline=color, width=2)
+
+
+def _band_strip(draw, comparison, x, y, width):
+    states = comparison.band_status
+    count = len(states)
+    for index, state in enumerate(states):
+        left = x + round(index / count * width)
+        right = x + round((index + 1) / count * width)
+        draw.rectangle((left, y, max(left, right - 1), y + 13), fill={0: TEAL, 1: ACCENT, 2: RED}[int(state)])
+
+
+def luminance_triptych(comparison: Comparison):
+    height, width = comparison.delta.shape
+    corrected = comparison.corrected_delta is not None
+    width_cap = max(84, min(240 if corrected else 300, width))
+    height_cap = max(120, min(420, height))
+    tags = ("FIRST SCAN", "SECOND SCAN", "SECOND minus FIRST")
+    columns = 4 if corrected else 3
+    raster = Image.new("RGB", (columns * (width_cap + 16) + 20, height_cap + (150 if corrected else 92)), PAGE)
+    draw = ImageDraw.Draw(raster)
+    panels = [byte_preview(comparison.left), byte_preview(comparison.right), _diverging(comparison.delta)]
+    if corrected:
+        panels.append(_diverging(comparison.corrected_delta, blank=comparison.band_status == WITHHELD))
+        tags += ("CORRECTED · EDGE REFERENCES",)
     for i, (tag, panel) in enumerate(zip(tags, panels)):
         x = 16 + i * (width_cap + 16)
-        print_text(draw, (x, 21), tag, 13, TEAL if i < 2 else ACCENT)
+        print_text(draw, (x, 21), tag, 12 if corrected else 13, TEAL if i < 2 else ACCENT)
         raster.paste(panel.resize((width_cap, height_cap), Image.Resampling.BILINEAR).convert("RGB"), (x, 49))
-    print_text(draw, (16, raster.height - 25), "Relative coordinates within each selected rectangle.", 12, MUTED)
+    if corrected:
+        report = comparison.illumination
+        references = report["references"]
+        _reference_marks(draw, (16, 49, 16 + width_cap, 49 + height_cap), comparison.selection.left,
+                         ((references["first"]["dark"], references["first"]["light"]),), (BLUE,))
+        _reference_marks(draw, (32 + width_cap, 49, 32 + 2 * width_cap, 49 + height_cap), comparison.selection.right,
+                         ((references["second"]["dark"], references["second"]["light"]),), (BLUE,))
+        strip_x = 16 + 3 * (width_cap + 16)
+        _band_strip(draw, comparison, strip_x, 49 + height_cap + 18, width_cap)
+        print_text(draw, (strip_x, 49 + height_cap + 36), "measured", 10, TEAL)
+        print_text(draw, (strip_x + 60, 49 + height_cap + 36), "estimated", 10, ACCENT)
+        print_text(draw, (strip_x + 126, 49 + height_cap + 36), "withheld", 10, RED)
+        print_text(draw, (16, raster.height - 26),
+                   "Reference boxes outlined on each source. Grey rows lack usable references; their corrected difference is left blank.",
+                   11, MUTED)
+        print_text(draw, (16, raster.height - 11),
+                   "Left panels and raw difference retain original scan codes. Corrected panel removes edge-referenced brightness and contrast.",
+                   11, MUTED)
+    else:
+        print_text(draw, (16, raster.height - 25), "Relative coordinates within each selected rectangle.", 12, MUTED)
     return encode_image(raster, "PNG")
+
+
+def reference_plate(report, first_image, second_image):
+    references = report["references"]
+    margin, cell, gap, strip = 20, 190, 16, 60
+    width = 2 * (cell + gap) + strip + margin * 2
+    canvas = Image.new("RGB", (max(width, 760), 2 * 214 + 104), PAGE)
+    draw = ImageDraw.Draw(canvas)
+    print_text(draw, (margin, 15), "EDGE REFERENCE PATCHES · NATIVE CROPS", 16, TEAL)
+    for row, (key, image, title) in enumerate((("first", first_image, "FIRST SCAN"),
+                                               ("second", second_image, "SECOND SCAN"))):
+        reference = references[key]
+        top = 52 + row * 214
+        print_text(draw, (margin, top), title, 13, TEAL)
+        for column, (side, tone) in enumerate((("dark", "DARK"), ("light", "LIGHT"))):
+            box = Box(*reference[side])
+            patch = byte_preview(box.subimage(image))
+            fitted = fitted_preview(patch, cell, 132, filter=Image.Resampling.BOX)
+            fitted = fitted.convert("RGB").resize((cell, 132), Image.Resampling.BILINEAR)
+            x = margin + column * (cell + gap)
+            canvas.paste(fitted, (x, top + 20))
+            draw.rectangle((x, top + 20, x + cell - 1, top + 151), outline=GRID)
+            print_text(draw, (x, top + 156), f"{tone} · {box.as_list()}", 10, MUTED)
+            quality = reference["quality"][side]
+            print_text(draw, (x, top + 170),
+                       f"median {fmt_value(reference[f'{side}_median'])} · usable {quality['usable']}/{report['coverage']['bands']}",
+                       10, MUTED)
+            print_text(draw, (x, top + 184),
+                       f"scratch {quality['scratch_or_obstruction']} · saturated {quality['saturated']} · "
+                       f"uneven {quality['uneven']}", 10, MUTED)
+        strip_x = margin + 2 * (cell + gap)
+        strip_width = strip - 16
+        for index, state in enumerate(np.asarray(report["band_states"])):
+            y = top + 20 + round(index / max(1, len(report["band_states"])) * 132)
+            y2 = top + 20 + round((index + 1) / max(1, len(report["band_states"])) * 132)
+            draw.rectangle((strip_x, y, strip_x + strip_width, max(y, y2 - 1)),
+                           fill={0: TEAL, 1: ACCENT, 2: RED}[int(state)])
+        print_text(draw, (strip_x, top + 156), "per-band quality", 10, MUTED)
+    legend_y = canvas.height - 46
+    for offset, (color, label) in enumerate(((TEAL, "measured"), (ACCENT, "estimated"), (RED, "withheld"))):
+        x = margin + offset * 110
+        draw.rectangle((x, legend_y + 2, x + 12, legend_y + 12), fill=color)
+        print_text(draw, (x + 18, legend_y), label, 10, MUTED)
+    print_text(draw, (margin, canvas.height - 18),
+               "Native crops from each own source at its retained recipe; bands without usable references are withheld.",
+               10, MUTED)
+    return encode_image(canvas, "PNG")
+
+
+def fmt_value(value, digits=5):
+    return "—" if value is None else f"{value:.{digits}f}"
 
 
 def spectrum_png(result: Spectrum, time_origin=0.0):

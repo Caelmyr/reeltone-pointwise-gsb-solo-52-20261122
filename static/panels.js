@@ -14,6 +14,20 @@ const defaults = {mode:'width', rate:24000, gain_db:6, low_hz:40, high_hz:0, ram
 const level = {type:'number', min:0, max:1, step:0.001};
 const integerOptions = {type:'number', min:0, step:1};
 
+function referenceDefaults(width, rows, side) {
+    const bounds = rows[1] > rows[0] ? rows : [0, Math.max(6, rows[0])];
+    const marker = Math.round(width * .63);
+    const alternate = Math.round(width * .71);
+    const middle = Math.floor((marker + alternate) / 2);
+    const box = side === 'dark'
+        ? [marker, Math.max(marker + 4, middle - 1)]
+        : [Math.min(middle + 1, alternate - 5), Math.max(alternate - 1, middle + 5)];
+    return [box[0], bounds[0], Math.min(width, box[1]), bounds[1]];
+}
+function storedReference(state, scanId, side, width, rows) {
+    return state.refBoxes?.[scanId]?.[side] || referenceDefaults(width, rows, side);
+}
+
 export function rowsFields(rows, limit) {
     return field('row0','原片起始行',rows[0],{...integerOptions,max:limit-1}) + field('row1','原片停止行',rows[1],{...integerOptions,max:limit});
 }
@@ -94,8 +108,14 @@ function toolControls(state) {
         const ow = first?.metadata.width || meta.width;
         const oh = first?.metadata.height || h;
         const optionList = choices.map(scan => [scan.id,scan.title]);
-        return select('other_scan','选择同卷的另一张扫描',optionList,first?.id,true)+mainBox+
-            boxInputs('other',[0,Math.min(box[1],oh-6),ow,Math.min(oh,Math.max(box[1]+6,box[3]))],'对照扫描上的原片范围');
+        if (!choices.length) return `<p class="panel-note">本卷还没有另一张扫描。先导入同片段的第二遍扫描，才能做两图对照。</p>${mainBox}`;
+        const kept = state.pairBoxes || {};
+        const mainDefault = kept.first || box;
+        const otherDefault = kept.other || [0,Math.min(box[1],oh-6),ow,Math.min(oh,Math.max(box[1]+6,box[3]))];
+        const otherRows = [otherDefault[1],otherDefault[3]];
+        const refs = state.refMode === 'on' ? referenceFields(state, first, mainDefault[1], mainDefault[3], otherRows) : '';
+        return select('other_scan','选择同卷的另一张扫描',optionList,first?.id,true)+boxInputs('box',mainDefault,'当前扫描上的原片范围')+
+            boxInputs('other',otherDefault,'对照扫描上的原片范围')+check('refs_on','用片边明暗参照校平照明',state.refMode === 'on',true)+refs;
     }
     if (t === 'exposure' || t === 'crop') return mainBox;
     if (t === 'splices') return mainBox + smallFields([['window','边界一侧样本行',8,3,30,1],['contrast','最小亮度跳变',.08,.015,.9,.001],['spacing','最少间隔行',40,6,1200,1]]);
@@ -127,7 +147,22 @@ export function toolPayload(state, node) {
         if (item && item.value !== '') out[key] = Number(item.value);
     }
     if (tool === 'references') {out.dark=readBox(node,'dark');out.light=readBox(node,'light');}
-    if (tool === 'compare') {out.other_box=readBox(node,'other');out.other_scan=value(node,'other_scan');}
+    if (tool === 'compare') {
+        const toggle = node.elements.namedItem('refs_on');
+        state.refMode = toggle && toggle.checked ? 'on' : 'off';
+        out.other_box = readBox(node,'other');
+        out.other_scan = value(node,'other_scan');
+        if (state.refMode === 'on') {
+            const scanId = state.scan.scan.id;
+            const first = {dark:readBox(node,'refdark'), light:readBox(node,'reflight')};
+            const second = {dark:readBox(node,'refdark2'), light:readBox(node,'reflight2')};
+            out.illumination = {first, second};
+            state.refBoxes = {...(state.refBoxes||{}), [scanId]:first, [out.other_scan]:second};
+            state.pairBoxes = {first:readBox(node,'box'), other:readBox(node,'other')};
+        } else {
+            out.illumination = null;
+        }
+    }
     if (tool === 'scope') {out.resolution=value(node,'resolution');out.take=value(node,'take') || null;out.monitor={...defaults,...state.monitor};}
     if (tool === 'wedge') {
         out.baseline = value(node,'baseline');
@@ -141,6 +176,20 @@ function toolPanel(state) {
     const selectTool = select('tool','巡检工具',Object.entries(TOOL),state.tool,true);
     const instruction = {compare:'分别指定两张扫描的对应原片范围。',wedge:'在已知透射率的参考片上分别选择三阶均匀区域。',pilot:'选择含有已知频率的参考声段。',splices:'可选取与声轨分开的片边，查找有横向支持的明暗突变。'};
     return `<section class="panel"><h2>原片巡检</h2>${form('tool-form',selectTool+toolControls(state),submit('运行巡检'))}${instruction[state.tool] ? `<p class="panel-note">${esc(instruction[state.tool])}</p>` : ''}</section>`;
+}
+
+function referenceFields(state, other, top, bottom, otherRows) {
+    if (!state.scan || !other) return '<p class="panel-note">先选择对照扫描，才能为两张图分别圈定明暗参照。</p>';
+    const rows = [Math.min(top, bottom), Math.max(top, bottom)];
+    const first = state.scan.scan.metadata;
+    const dark = storedReference(state, first.id, 'dark', first.width, rows);
+    const light = storedReference(state, first.id, 'light', first.width, rows);
+    const otherDark = storedReference(state, other.id, 'dark', other.metadata.width, otherRows);
+    const otherLight = storedReference(state, other.id, 'light', other.metadata.width, otherRows);
+    const adopt = (name, label, scanId) => `<div class="reference-tools">${action('ref-use', label, {box:name,scan:scanId})}</div>`;
+    return `<div class="reference-group"><small class="full">第一张 · ${esc(state.scan.scan.title)}</small>${boxInputs('refdark',dark,'第一张暗参照')}${adopt('refdark','用当前选框',first.id)}${boxInputs('reflight',light,'第一张亮参照')}${adopt('reflight','用当前选框',first.id)}</div>`+
+        `<div class="reference-group"><small class="full">第二张 · ${esc(other.title)}</small>${boxInputs('refdark2',otherDark,'第二张暗参照')}${adopt('refdark2','用当前选框',other.id)}${boxInputs('reflight2',otherLight,'第二张亮参照')}${adopt('reflight2','用当前选框',other.id)}</div>`+
+        '<p class="panel-note full">每张图各自圈定片边明暗参照；要按第二张自己的位置框选，先在左侧打开第二张扫描再回到本工具。原值与未校正差值仍会保留，校正只扣除参照能解释的亮度与反差。参照遇划痕、饱和或缺失的行带会标为估算或留空。</p>';
 }
 
 function retention(state) {
@@ -164,13 +213,39 @@ export function auditStubHistory(history) {
     return `<div class="data-list">${rows.join('')}</div>`;
 }
 
+export function referencePins(reading, kind) {
+    if (kind !== 'compare' || !reading.illumination) return '';
+    const rows = Object.entries(reading.illumination.references).map(([key, entry]) => {
+        const first = key === 'first';
+        const review = (side, label) => action('show-reference', label,
+            {scan:entry.scan_id,recipe:entry.recipe_id || '',box:entry[side].join(','),title:`${first?'第一张':'第二张'}${label}`});
+        const darkQuality = entry.quality.dark, lightQuality = entry.quality.light;
+        const caption = `暗 ${fmt(entry.dark_median,4)} · 亮 ${fmt(entry.light_median,4)} · 可用暗/亮 ${darkQuality.usable}/${lightQuality.usable} 行带`;
+        return record(`${first ? '第一张' : '第二张'}扫描的明暗参照`,
+            `${caption} · 暗 ${entry.dark.join(' · ')} · 亮 ${entry.light.join(' · ')}`,
+            `${review('dark','查看暗框')}${review('light','查看亮框')}`);
+    }).join('');
+    return `<div class="data-list">${rows}</div>`;
+}
+
+function correctedMetrics(reading) {
+    if (!reading.illumination) return '';
+    const coverage = reading.illumination.coverage;
+    const corrected = reading.illumination.corrected.admitted;
+    return metrics([['可用于校正的行带',`${fmt(coverage.measured,0)} / ${fmt(coverage.bands,0)}`],
+        ['估算行带',`${fmt(coverage.estimated,0)}`],['留空行带',`${fmt(coverage.withheld,0)}`],
+        ['校正后平均差',corrected ? fmt(corrected.mean_delta) : '—'],
+        ['校正后绝对差 P95',corrected ? fmt(corrected.q95_absolute_delta) : '—']]);
+}
+
 function readingValue(tool, data) {
     switch (tool) {
         case 'exposure': return [['平均亮度',fmt(data.stats.mean)],['近黑像素',percent(data.stats.near_black_fraction)],['近白像素',percent(data.stats.near_white_fraction)],['读数像素',fmt(data.stats.pixel_count,0)]];
         case 'perforations': return [['代表孔距',data.pitch ? `${fmt(data.pitch)} 行` : '未确认'],['支持孔数',data.trusted_count],['缺孔估计',data.estimated_missing_holes]];
         case 'contour': return [['触读窗的行',fmt(data.summary.touch_window_rows,0)],['多个透光区的行',fmt(data.summary.multiple_island_rows,0)],['轮廓阈值',fmt(data.summary.threshold_absolute)]];
         case 'scope': return [['主频分箱',`${fmt(data.spectrum.dominant_bin_hz,1)} Hz`],['分析带宽',`${fmt(data.spectrum.inspected_band_hz,1)} Hz`],['窗长',`${data.spectrum.window_samples} 样本`]];
-        case 'compare': return [['平均亮度差',fmt(data.agreement.mean_delta)],['绝对差 P95',fmt(data.agreement.q95_absolute_delta)],['相关',fmt(data.agreement.linear_r)]];
+        case 'compare': return [['未校正平均差',fmt(data.agreement.mean_delta)],['未校正绝对差 P95',fmt(data.agreement.q95_absolute_delta)],
+            ['相关',fmt(data.agreement.linear_r)],...(data.illumination ? [['校正模式','片边参照']] : [])];
         case 'blemish': return [['候选',data.candidate_count],['覆盖率',percent(data.coverage,2)],['对比阈值',fmt(data.threshold)]];
         case 'sample': return [['原片坐标',`${data.x}, ${data.y}`],[data.code_description,fmt(data.original_code,0)],['透光读值',fmt(data.decoded_intensity,5)]];
         case 'crop': return [['原片框',data.box.join(' · ')],['码值深度',`${data.sample_bit_depth} bit`]];
@@ -188,10 +263,11 @@ export function instrumentResult(data) {
     const {kind,reading} = data;
     const img = image(data.preview,`${TOOL[kind]}结果`) + image(data.companion,`${TOOL[kind]}配套图`);
     const warnings = [reading.warning, ...(reading.warnings || []), reading.interpretation, reading.caveat].filter(Boolean);
+    const details = kind === 'compare' ? [...(reading.illumination?.warnings || [])] : [];
     const widgets = [data.can_retain ? action('retain-instrument','保存图像证据',{},'strong') : '',
         kind === 'references' && reading.usable ? action('use-references','用于读片配方') : ''].join('');
     const list = kind === 'locate' ? reading.candidates.map((row,n)=>record(`候选 ${n+1} · ${row.guide.join('–')} 列`, `侧向变动评分 ${fmt(row.score)}`,action('apply-track','填入读窗',{a:row.guide[0],b:row.guide[1]}))).join('') : '';
-    return `<article class="box"><h2>${TOOL[kind]}</h2>${metrics(readingValue(kind,reading))}${warnings.map(line=>`<p class="panel-note status-warning">${esc(line)}</p>`).join('')}<div class="inspect-media">${img}</div><div class="data-list">${list}</div><div class="form-footer">${widgets}</div>${jsonDetails(reading)}</article>`;
+    return `<article class="box"><h2>${TOOL[kind]}</h2>${metrics(readingValue(kind,reading))}${correctedMetrics(kind === 'compare' ? reading : {})}${warnings.map(line=>`<p class="panel-note status-warning">${esc(line)}</p>`).join('')}${details.map(line=>`<p class="panel-note status-warning">${esc(line)}</p>`).join('')}<div class="inspect-media">${img}</div>${referencePins(reading, kind)}<div class="data-list">${list}</div><div class="form-footer">${widgets}</div>${jsonDetails(reading)}</article>`;
 }
 
 export function soundResult(report, waveform) {

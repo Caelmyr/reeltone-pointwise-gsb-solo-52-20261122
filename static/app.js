@@ -1,12 +1,12 @@
 import {$, all, action, boxInputs, check, checked, closeModal, dt, esc, field, fmt, form, image, jsonDetails, link, listTable, metrics, modal, notice, number, post, readBox, record, reelURL, request, scanURL, select, shorten, span, submit, textarea, value} from './ui.js';
 import {blank, connectFilm, currentBox, filmPage, filmSpan, library, refreshFilmOverlay, techSummary} from './film.js';
-import {auditStubHistory, extractMonitor, extractRows, instrumentResult, readingDetails, recipeFrom, rowsFields, settingsPanel, soundResult, TABS, TOOL, toolPayload, waveCanvas} from './panels.js';
+import {auditStubHistory, extractMonitor, extractRows, instrumentResult, readingDetails, recipeFrom, referencePins, rowsFields, settingsPanel, soundResult, TABS, TOOL, toolPayload, waveCanvas} from './panels.js';
 import {cueForm, deskPage, packetReady, zipSummary} from './desk.js';
 
 const state = {
     library:{reels:[]}, reel:null, scan:null, takes:[], proofs:[], workspace:'scan', panel:'recipe', tool:'exposure',
     frame:{start:0,rows:480,tonal:'native',point:null,selection:null}, monitor:{}, listenRows:null, result:null,
-    instrumentContext:null, pairScan:null, desk:null, modalData:null, scanTicket:0,
+    instrumentContext:null, pairScan:null, refMode:'off', refBoxes:{}, desk:null, modalData:null, scanTicket:0,
 };
 
 function drawLibrary() { $('#library').innerHTML = library(state); }
@@ -214,7 +214,8 @@ function viewProof(resultData) {
     const near = Array.isArray(parentBox) ? parentBox[1] : (info.evidence.source_rows?.[0] || 0);
     const tools = [link(primary+'?download=1','下载证据 PNG'), info.secondary_sha256 ? link(secondary+'?download=1','下载配套 PNG') : '',
         link(`/api/proofs/${info.id}/reading.json`,'下载来源与读数 JSON'),action('take-to-source','定位来源',{id:info.scan_id,recipe:info.recipe_id,row:near})].join('');
-    modal(info.title,`<p class="panel-note ${resultData.verified?'status-good':'status-error'}">${resultData.verified?'内容和源位置校验通过。':'保存内容在校验中出现差异。'}</p><div class="inspect-media">${image(primary,'留存证据图')}${second}</div><div class="form-footer">${tools}</div>${jsonDetails(info.evidence)}${jsonDetails(resultData.integrity,'校验核对')}`);
+    const pins = info.category === 'comparison' ? referencePins(info.evidence, 'compare') : '';
+    modal(info.title,`<p class="panel-note ${resultData.verified?'status-good':'status-error'}">${resultData.verified?'内容和源位置校验通过。':'保存内容在校验中出现差异。'}</p><div class="inspect-media">${image(primary,'留存证据图')}${second}</div>${pins ? `<p class="panel-note">留存的两张参照框仍可点回各自的扫描核对；校正行带状态见读数 JSON。</p>${pins}` : ''}<div class="form-footer">${tools}</div>${jsonDetails(info.evidence)}${jsonDetails(resultData.integrity,'校验核对')}`);
 }
 
 function originalJump(data) {
@@ -308,6 +309,27 @@ const commands = {
     'open-native':originalJump,
     'apply-track':data=>{state.panel='recipe';drawSettings();$('#recipe-form').elements.a0.value=data.a;$('#recipe-form').elements.a1.value=data.b;notice('已将候选填入配方。核对列范围后保存。');},
     'use-references':()=>{const targets=state.instrumentContext?.response.reading;if(!targets?.usable) return;state.panel='recipe';drawSettings();$('#recipe-form').elements.black.value=targets.black;$('#recipe-form').elements.white.value=targets.white;},
+    'ref-use':data=>{
+        if (!state.frame.selection) throw Error('先在原片上拖动框选一个参照区。');
+        if (state.scan?.scan?.id!==data.scan) throw Error('请先在左侧打开这张扫描，再框选参照后填入。');
+        const form=$('#tool-form');
+        if (!form) throw Error('请先回到「巡检」的对照工具。');
+        if (data.box.includes('2') && value(form,'other_scan')!==data.scan) {
+            throw Error('当前打开的是第二张扫描。请把「选择同卷的另一张扫描」选成第一张，再运行对照。');
+        }
+        ['0','1','2','3'].forEach((suffix,i)=>{const input=form.elements.namedItem(`${data.box}${suffix}`);if(input) input.value=state.frame.selection[i];});
+        notice(`已把当前选框填入${data.box.includes('2')?'第二张':'第一张'}的参照框。`);
+    },
+    'show-reference':data=>{
+        state.workspace='scan';
+        const jump=()=>{
+            const box=String(data.box||'').split(',').map(Number);
+            if (box.length===4 && box.every(Number.isFinite)) {state.frame.selection=box;windowStart(box[1]);}
+            notice(`已定位「${data.title||'明暗参照'}」框。`);
+        };
+        if (state.scan?.scan?.id===data.scan) {jump();return Promise.resolve();}
+        return openScan(data.scan,data.recipe || null,{workspace:true}).then(jump);
+    },
     'retain-instrument':()=>{
         if(!state.instrumentContext?.response.can_retain) return;
         const tool=state.instrumentContext.kind;
@@ -454,7 +476,20 @@ document.addEventListener('change',event=>{
     const node=event.target;
     const form=node.form;
     if(form?.id==='tool-form' && node.name==='tool') {state.tool=node.value;drawSettings();}
-    if(form?.id==='tool-form' && node.name==='other_scan') {state.pairScan=node.value;drawSettings();}
+    if(form?.id==='tool-form' && node.name==='other_scan') {
+        if (form.elements.namedItem('box0')) state.pairBoxes={first:readBox(form,'box'),other:readBox(form,'other')};
+        state.pairScan=node.value;drawSettings();
+    }
+    if(form?.id==='tool-form' && node.name==='refs_on') {
+        if(node.checked && form.elements.namedItem('refdark0')) {
+            const scanId=state.scan.scan.id;
+            const otherId=state.pairScan || state.reel.scans.find(scan=>scan.id!==scanId)?.id;
+            if(otherId) state.refBoxes={...(state.refBoxes||{}),
+                [scanId]:{dark:readBox(form,'refdark'),light:readBox(form,'reflight')},
+                [otherId]:{dark:readBox(form,'refdark2'),light:readBox(form,'reflight2')}};
+        }
+        state.refMode=node.checked?'on':'off';drawSettings();
+    }
     if(form?.id==='batch-form' && node.name==='batch') {state.modalData.digest=null;$('#intake-result').replaceChildren();}
     if(form?.id==='packet-form') {updatePacketForm();if(node.name==='playtake') rerenderPlaylist();}
 });

@@ -4,8 +4,8 @@ from hashlib import sha256
 from .audition import read_wav
 from .bench import Material, analyze_track, load_material
 from .blemishes import MAX_QC_PIXEL_COUNT, mark_overlaps, scan_blemishes
-from .comparison import Pair, compare_exposure, paired_line_profile
-from .contracts import identifier, integer, option, real, text
+from .comparison import Comparison, Pair, analyze_illumination, compare_exposure, paired_line_profile
+from .contracts import identifier, integer, mapping, option, real, text
 from .errors import Absent, BenchError, Conflict, Limit
 from .exposure import density_rolloff, exposure_report, reference_suggestion
 from .geometry import Box
@@ -20,7 +20,7 @@ from .slit import examine_slit
 from .pilot import assay
 from .visual import (
     ACCENT, BLUE, TEAL, PlotSeries, blemish_heat, evidence_plate, exposure_heat,
-    line_plot, luminance_triptych, spectrum_png,
+    line_plot, luminance_triptych, reference_plate, spectrum_png,
 )
 
 
@@ -146,12 +146,51 @@ def compare(material, request, catalog):
     b = Box.parse(request.get("other_box"), other.width, other.height, minimum=(4, 6), name="对照片范围")
     if a.area + b.area > 3_600_000:
         raise Limit("对照选区合计最多 360 万像素。")
-    selection = Pair(a, b, material.record["id"], other.record["id"])
+    selection = Pair(a, b, material.record["id"], other.record["id"], material.recipe_record["id"],
+                     other.recipe_record["id"])
+    referenced = reference_pair(material, other, request)
     comparison = compare_exposure(material.pixels, other.pixels, selection)
+    illumination = None
+    if referenced:
+        dark_a, light_a, dark_b, light_b = referenced
+        correction = analyze_illumination(comparison.left, comparison.right, selection,
+                                          {"first": (dark_a, light_a), "second": (dark_b, light_b)},
+                                          material.pixels, other.pixels)
+        illumination = correction["report"]
+        comparison = Comparison(selection, comparison.left, comparison.right, comparison.delta,
+                                comparison.left_hist, comparison.right_hist, comparison.agreement,
+                                illumination, correction["left"], correction["right"], correction["delta"],
+                                correction["status"])
     report = comparison.summary()
     report.update({"parent": material.identity(), "reference": other.identity(), "related_scans": [other.record["id"]],
                    "row_profiles": paired_line_profile(comparison)})
-    return Result("compare", report, luminance_triptych(comparison), category="comparison")
+    preview = luminance_triptych(comparison)
+    companion = reference_plate(illumination, material.pixels, other.pixels) if illumination else None
+    return Result("compare", report, preview, companion, category="comparison")
+
+
+def reference_pair(material, other, request):
+    """Parse optional per-scan dark/light reference boxes; absent boxes leave the plain comparison."""
+    raw = request.get("illumination")
+    if raw is None:
+        return None
+    raw = mapping(raw, "片边明暗参照")
+    given = [raw.get("first"), raw.get("second")]
+    if all(item is None for item in given):
+        return None
+    if any(item is None for item in given):
+        raise BenchError("两张扫描须各自指定明暗参照，或都留空使用不加参照的对照。")
+    boxes = []
+    for item, source, name in zip(given, (material, other), ("第一张", "第二张")):
+        item = mapping(item, f"{name}扫描的明暗参照")
+        dark = Box.parse(item.get("dark"), source.width, source.height, minimum=(4, 6), name=f"{name}暗参照")
+        light = Box.parse(item.get("light"), source.width, source.height, minimum=(4, 6), name=f"{name}亮参照")
+        if dark.intersection(light):
+            raise BenchError(f"{name}扫描的明暗参照框须相互分离。")
+        if dark.area + light.area > 580_000:
+            raise Limit(f"{name}扫描的参照取样合计最多 58 万像素。")
+        boxes.extend((dark, light))
+    return boxes
 
 
 def sample(material, request, catalog):

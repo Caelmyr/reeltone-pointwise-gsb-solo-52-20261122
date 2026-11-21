@@ -164,6 +164,10 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .playlist-item .row-tools button { padding: 5px; min-height: 28px; }
 .checklist { display: flex; flex-wrap: wrap; gap: 7px 13px; }
 .box-row { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 5px; width: 100%; }
+.reference-group { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 6px; padding: 7px 0; border-top: 1px dashed #354752; }
+.reference-group small.full { grid-column: 1 / -1; color: var(--muted); }
+.reference-tools { grid-column: 1 / -1; margin: -2px 0 3px; }
+.reference-tools button { min-height: 26px; padding: 3px 8px; font-size: 11px; }
 .box-row label { min-width: 0; }
 .export-panel { display: grid; gap: 8px; }
 .preview-grid { display: flex; flex-wrap: wrap; align-items: start; gap: 7px; margin-top: 9px; }
