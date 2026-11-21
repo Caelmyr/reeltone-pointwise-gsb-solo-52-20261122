@@ -17,6 +17,7 @@ from .spectrum import narrowband_profile
 from .sensitometry import assess_steps
 from .splices import inspect_splices
 from .slit import examine_slit
+from .timing import clock_from_dict
 from .pilot import assay
 from .visual import (
     ACCENT, BLUE, TEAL, PlotSeries, blemish_heat, evidence_plate, exposure_heat,
@@ -193,14 +194,14 @@ def scope(material: Material, request, catalog):
         if stored["recipe_id"] != material.recipe_record["id"]:
             raise Conflict("请先打开该监听使用的读片配方。")
         waveform, rate = read_wav(stored["wav"])
-        clock, _ = material.clock()
+        clock = clock_from_dict(stored["payload"]["clock"])
         source_rows = stored["payload"]["audio"]["source_rows"]
         related = {"kind": "retained", "take_id": stored["id"], "take_sha256": stored["wav_sha256"]}
     else:
         source_rows, _, _, recorded, _ = analyze_track(material, request)
         waveform, rate, clock = recorded.wave, recorded.render_rate, recorded.clock
         related = {"kind": "live"}
-    spectrum, result = narrowband_profile(waveform, rate, clock, resolution)
+    spectrum, result = narrowband_profile(waveform, rate, clock, resolution, source_rows)
     time0, _ = clock.extent(source_rows)
     plot = spectrum_png(spectrum, time_origin=time0)
     data = {"parent": material.identity(), "source_rows": list(source_rows), "signal": related, "window": resolution,

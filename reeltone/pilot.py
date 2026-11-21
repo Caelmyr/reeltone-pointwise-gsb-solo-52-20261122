@@ -61,8 +61,10 @@ class Window:
     def valid(self):
         return self.state == "trusted"
 
-    def summary(self, reference, native_start, native_end, reverse):
-        if reverse:
+    def summary(self, reference, native_start, native_end, reverse, positions=None):
+        if positions is not None:
+            a, b = min(positions), max(positions)
+        elif reverse:
             a, b = native_end - self.stop, native_end - self.start
         else:
             a, b = native_start + self.start, native_start + self.stop
@@ -83,13 +85,16 @@ class AuditedTone:
     rate: float
     source: tuple[int, int]
     reverse: bool
+    positions: tuple | None = None
 
     @cached_property
     def trusted(self):
         return [item for item in self.windows if item.valid]
 
     def reports(self):
-        return [window.summary(self.expected.frequency, *self.source, self.reverse) for window in self.windows]
+        paired = zip(self.windows, self.positions) if self.positions else ((window, None) for window in self.windows)
+        return [window.summary(self.expected.frequency, *self.source, self.reverse, positions)
+                for window, positions in paired]
 
     def summary(self):
         admitted = len(self.trusted)
@@ -181,7 +186,7 @@ def tone_window(samples, start, stop, rate, guide):
                   skew, tuple(harmonic_power), state)
 
 
-def build_audit(samples, rate, rows, reverse, guide):
+def build_audit(samples, rate, rows, reverse, guide, clock=None):
     maximum = min(len(samples), round(rate * guide.window_ms / 1000))
     if maximum < max(32, round(rate * 5.0 / guide.frequency)):
         raise BenchError("当前片段须至少包含基准音的五个完整周期。")
@@ -192,7 +197,16 @@ def build_audit(samples, rate, rows, reverse, guide):
     if boundaries[-1] < len(samples) - maximum - stride // 3:
         boundaries.append(len(samples) - maximum)
     windows = tuple(tone_window(samples, start, start + maximum, rate, guide) for start in boundaries)
-    return AuditedTone(guide, windows, rate, tuple(rows), reverse)
+    positions = None
+    if clock is not None and clock.local:
+        base = min(clock.edge_to_time(rows[0]), clock.edge_to_time(rows[1]))
+        positions = []
+        for window in windows:
+            first = clock.span_at_time(base + window.start / rate)
+            last = clock.span_at_time(base + window.stop / rate)
+            positions.append((int(first), int(last)))
+        positions = tuple(positions)
+    return AuditedTone(guide, windows, rate, tuple(rows), reverse, positions)
 
 
 def guidance_plot(observation):
@@ -240,13 +254,13 @@ def assay(material, request):
 
     rows = material.rows(request, min_span=18)
     clock, _ = material.clock()
-    if (rows[1] - rows[0]) / clock.rows_per_second > 22:
+    if clock.duration(rows) > 22:
         raise BenchError("基准音检测一次支持最多 22 秒。")
-    expected = Standard.parse(request, clock.rows_per_second)
+    expected = Standard.parse(request, clock.rate_range(rows)[0])
     optical = read_area(material.pixels, material.recipe.aperture, material.recipe.tone, rows)
     monitor = Monitor.parse(request.get("monitor", {}))
     base, _ = normalize_signal(optical, monitor, clock)
-    observation = build_audit(base, clock.rows_per_second, rows, clock.reverse, expected)
+    observation = build_audit(base, clock.rate_range(rows)[0], rows, clock.reverse, expected, clock)
     stats = observation.summary()
     stats.update({"parent": material.identity(), "sample_clock": clock.as_dict(rows), "windows_detail": observation.reports(),
                   "operating_note": "监测原生扫描行的基准音。WAV 重采样率和监听增益不会影响此判断。"})

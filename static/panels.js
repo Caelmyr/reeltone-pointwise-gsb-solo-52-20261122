@@ -9,7 +9,7 @@ export const TOOL = {
 export const TABS = {recipe:'配方', read:'监听', tools:'巡检', retained:'记录'};
 const SIGNAL = [['width','透光宽度'],['light','平均扫描亮度']];
 const RATES = [8000,12000,16000,22050,24000,32000,44100,48000].map(n => [n,`${n.toLocaleString()} Hz`]);
-const RATE_FIELDS = [['manual','手动行速'],['perfs','齿孔测量']];
+const RATE_FIELDS = [['manual','手动行速'],['perfs','齿孔测量'],['local','局部齿孔节奏']];
 const defaults = {mode:'width', rate:24000, gain_db:6, low_hz:40, high_hz:0, ramp_ms:6, center:'median'};
 const level = {type:'number', min:0, max:1, step:0.001};
 const integerOptions = {type:'number', min:0, step:1};
@@ -57,7 +57,8 @@ function recipePanel(state) {
         field('label','版本标签','手工读片校准',{full:true,maxlength:100}),
     ].join('');
     const tools = `${submit('保存读片配方')}${action('apply-selection','用选框定位')}`;
-    return `<section class="panel"><div class="panel-title"><h2>读片配方</h2>${action('history','查看版本',{},'subtle')}</div><p class="panel-note">读窗和齿孔带按原片列指定。镜像只改变查看方向，反向走片也会改变监听顺序。</p>${form('recipe-form',controls,tools)}</section>`;
+    const clockHint = d.clock.model === 'local' ? '<p class="panel-note">局部齿孔节奏：每段可确认的相邻孔距按实测节奏计时；齿孔被胶带挡住的区段仍可听，但会标为估算，其后可确认的区段继续按各自观测节奏计时。</p>' : '';
+    return `<section class="panel"><div class="panel-title"><h2>读片配方</h2>${action('history','查看版本',{},'subtle')}</div><p class="panel-note">读窗和齿孔带按原片列指定。镜像只改变查看方向，反向走片也会改变监听顺序。</p>${clockHint}${form('recipe-form',controls,tools)}</section>`;
 }
 
 function readPanel(state) {
@@ -144,8 +145,13 @@ function toolPanel(state) {
 }
 
 function retention(state) {
-    const takes = state.takes.map(take=>record(take.title,`${TAKE[take.status]} · v${take.payload.parent.recipe_number} · ${fmt(take.payload.audio.duration_seconds)} s`,
-        `${action('open-take','打开',{id:take.id})}${link(`/api/takes/${take.id}/wav?download=1`,'WAV')}`)).join('');
+    const takes = state.takes.map(take=>{
+        const audio = take.payload.audio;
+        const estimates = audio.clock_mapping === 'local_perforation' && audio.estimated_spans?.length;
+        const caption = `${TAKE[take.status]} · v${take.payload.parent.recipe_number} · ${fmt(audio.duration_seconds)} s${estimates?` · 含 ${audio.estimated_spans.length} 段估算`:''}`;
+        return record(take.title,caption,
+            `${action('open-take','打开',{id:take.id})}${link(`/api/takes/${take.id}/wav?download=1`,'WAV')}`);
+    }).join('');
     const proofs = state.proofs.map(proof=>record(proof.title,`${proof.category} · ${dt(proof.created)}`,action('open-proof','打开',{id:proof.id}))).join('');
     const markers = state.scan.markers.map(marker=>record(marker.title,`原片 ${marker.display.box.join(' · ')}`,action('open-marker','定位',{id:marker.id}))).join('');
     return `<section class="panel"><div class="panel-title"><h2>监听快照</h2>${state.takes.length > 1 ? action('open-ab','A/B 对听',{},'subtle') : ''}</div><div class="data-list">${takes || '<p class="panel-note">还未保存监听。</p>'}</div></section><section class="panel"><h2>图像证据</h2><div class="data-list">${proofs || '<p class="panel-note">还未保存图像证据。</p>'}</div></section><section class="panel"><h2>定位框</h2><div class="data-list">${markers || '<p class="panel-note">还未保存定位框。</p>'}</div></section>`;
@@ -196,10 +202,28 @@ export function instrumentResult(data) {
 
 export function soundResult(report, waveform) {
     const audio = report.audio;
-    const metricsList = [['监听时长',`${fmt(audio.duration_seconds,4)} s`],['原片行',span(audio.source_rows)],['采样率',`${fmt(audio.output_rate,0)} Hz`],['原片行速',`${fmt(audio.row_rate,2)} 行/s`]];
+    const clock = report.clock || {};
+    const local = audio.clock_mapping === 'local_perforation';
+    const metricsList = [['监听时长',`${fmt(audio.duration_seconds,4)} s`],['原片行',span(audio.source_rows)],['采样率',`${fmt(audio.output_rate,0)} Hz`],
+        ['原片行速',local?`${fmt(audio.local_rate_range?.[0],2)}–${fmt(audio.local_rate_range?.[1],2)} 行/s`:`${fmt(audio.row_rate,2)} 行/s`]];
+    if (local) {
+        metricsList.push(['定时方式','局部齿孔节奏'],['估算时长',`${fmt(audio.estimated_seconds ?? 0,4)} s`]);
+    }
     const advisories = [...(audio.warnings || []),...(report.read.warnings || [])];
-    const graph = waveform?.length ? '<canvas id="waveform" class="sound-wave" width="940" height="166" role="slider" aria-label="沿波形定位原片行" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0"></canvas><p class="panel-note">点击波形可回到相应的原片行。音频播放器仍可独立拖动。</p>' : '';
-    return `<article class="box"><h2>光学监听结果</h2>${metrics(metricsList)}${graph}${advisories.map(line=>`<p class="panel-note">${esc(line)}</p>`).join('')}${jsonDetails(report.clock,'原片行与时间基准')}</article>`;
+    const estimated = waveform?.some(bin => bin.estimated);
+    const graph = waveform?.length ? `<canvas id="waveform" class="sound-wave" width="940" height="166" role="slider" aria-label="沿波形定位原片行${estimated?'，浅色带为估算区段':''}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0"></canvas><p class="panel-note">点击波形可回到相应的原片行。${estimated?'浅色区段齿孔无法确认，时间按相邻节奏估算。后续已确认区段仍按各自实测节奏。':''}音频播放器仍可独立拖动。</p>` : '';
+    const rows = local && report.clock_rows?.length
+        ? `<div class="data-list">${localClockSummary(report.clock_rows)}</div>`
+        : '';
+    return `<article class="box"><h2>光学监听结果</h2>${metrics(metricsList)}${graph}${advisories.map(line=>`<p class="panel-note">${esc(line)}</p>`).join('')}${rows}${jsonDetails(clock,'原片行与时间基准')}</article>`;
+}
+
+function localClockSummary(entries) {
+    const measured = entries.filter(entry => entry.trusted);
+    const estimated = entries.filter(entry => !entry.trusted);
+    const range = measured.length ? `实测节奏 ${fmt(Math.min(...measured.map(e=>e.rate)),2)}–${fmt(Math.max(...measured.map(e=>e.rate)),2)} 行/s · ${measured.length} 段` : '没有实测段';
+    return record('实测齿孔节奏', range) + estimated.map(entry =>
+        record(`${span(entry.native_rows)} 行`, `估算 · 沿用相邻节奏 ${fmt(entry.rate,2)} 行/s`)).join('');
 }
 
 export function waveCanvas(data, seek) {
@@ -210,9 +234,15 @@ export function waveCanvas(data, seek) {
     context.fillStyle = '#13202a';context.fillRect(0,0,w,h);
     context.strokeStyle = '#36515c';
     for(let y=20;y<h-11;y+=32) {context.beginPath();context.moveTo(0,y);context.lineTo(w,y);context.stroke();}
+    const binWidth = w/data.length;
+    for (let n=0;n<data.length;n++) {
+        if (!data[n].estimated) continue;
+        context.fillStyle = 'rgba(174,174,239,.20)';
+        context.fillRect(w*n/data.length,0,Math.max(1,binWidth),h);
+    }
     const amp = Math.max(.45, Math.min(1.12, Math.max(...data.map(part => Math.max(Math.abs(part.low),Math.abs(part.high))))));
     const y = n => h*.5 - Math.min(1,Math.max(-1,n/amp))*h*.42;
-    context.strokeStyle = '#77ddd0';context.lineWidth = Math.max(1,w/data.length);
+    context.strokeStyle = '#77ddd0';context.lineWidth = Math.max(1,binWidth);
     context.beginPath();
     for (let n=0;n<data.length;n++) {const x = w*n/data.length;context.moveTo(x,y(data[n].low));context.lineTo(x,y(data[n].high));}
     context.stroke();
@@ -230,6 +260,14 @@ export function readingDetails(verification) {
     const {record:take,source,recipe,verified,integrity} = verification;
     const report = take.payload;
     const rate = report.audio.output_rate;
-    return metrics([['复核状态',TAKE[take.status]],['配方',`v${recipe.seq}`],['时长',`${fmt(report.audio.duration_seconds,4)} s`],['采样率',`${fmt(rate,0)} Hz`]]) +
-        `<p class="panel-note ${verified?'status-good':'status-error'}">${verified?'源图、配方和 WAV 摘要均通过校验。':'保存的证据有差异。'}</p><audio controls preload="metadata" src="/api/takes/${take.id}/wav" style="width:100%"></audio><div class="form-footer">${link(`/api/takes/${take.id}/wav?download=1`,'下载 WAV')}${action('set-take','标为已复核',{id:take.id,state:'reviewed'},'strong')}${action('set-take','暂缓',{id:take.id,state:'hold'})}${action('set-take','转回草稿',{id:take.id,state:'draft'})}${action('take-to-source','定位原片',{id:source.id,recipe:recipe.id,row:report.audio.source_rows[0]})}${action('open-replay','复算核对',{id:take.id})}</div>${jsonDetails(integrity,'校验明细')}`;
+    const local = report.audio.clock_mapping === 'local_perforation';
+    const head = [['复核状态',TAKE[take.status]],['配方',`v${recipe.seq}`],['时长',`${fmt(report.audio.duration_seconds,4)} s`],['采样率',`${fmt(rate,0)} Hz`]];
+    if (local) head.push(['定时方式','局部齿孔节奏'],['估算时长',`${fmt(report.audio.estimated_seconds ?? 0,4)} s`]);
+    const estimated = local ? (report.audio.estimated_spans || []) : [];
+    const estimateNote = estimated.length
+        ? `<p class="panel-note status-warning">以下时间区间齿孔节奏无法确认，按相邻节奏估算：${estimated.map(s=>`${span(s.native_rows)} 行（${s.seconds.map(v=>fmt(v,4)).join('–')} s）`).join('；')}。</p>` : '';
+    const firstRow = report.clock?.reverse ? report.audio.source_rows[1] - 1 : report.audio.source_rows[0];
+    const graph = verification.waveform?.length ? `<canvas id="waveform" class="sound-wave" width="940" height="166" role="slider" aria-label="沿已保存监听定位原片行" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0"></canvas><p class="panel-note">点击波形按保存时的行—时间映射回到对应原片行。${local?'浅色带为估算时间。':''}</p>` : '';
+    return metrics(head) +
+        `<p class="panel-note ${verified?'status-good':'status-error'}">${verified?'源图、配方和 WAV 摘要均通过校验。':'保存的证据有差异。'}</p>${estimateNote}${graph}<audio controls preload="metadata" src="/api/takes/${take.id}/wav" style="width:100%"></audio><div class="form-footer">${link(`/api/takes/${take.id}/wav?download=1`,'下载 WAV')}${action('set-take','标为已复核',{id:take.id,state:'reviewed'},'strong')}${action('set-take','暂缓',{id:take.id,state:'hold'})}${action('set-take','转回草稿',{id:take.id,state:'draft'})}${action('take-to-source','定位原片',{id:source.id,recipe:recipe.id,row:firstRow})}${action('open-replay','复算核对',{id:take.id})}</div>${jsonDetails(integrity,'校验明细')}`;
 }

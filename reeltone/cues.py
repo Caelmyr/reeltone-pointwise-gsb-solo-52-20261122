@@ -8,7 +8,7 @@ from .audition import RATES, read_wav, wav_bytes
 from .contracts import flag, identifier, integer, mapping, option, sequence, shipment_stem, split_rows, text
 from .errors import BenchError, Conflict, Limit
 from .store import CUE_KINDS, CUE_STATES
-from .timing import format_side_time
+from .timing import clock_from_dict, format_side_time
 
 
 MAX_PLAYLIST = 12
@@ -87,13 +87,15 @@ def validate_cue_anchor(cue, take, scan_id):
     if not a <= cue["y0"] < cue["y1"] <= b:
         raise Conflict("标记不在所选监听的原生扫描行范围内。")
     details = take["payload"]["clock"]
-    scale = details["rows_per_second"]
-    if details["reverse"]:
-        start, stop = (b - cue["y1"]) / scale, (b - cue["y0"]) / scale
-    else:
-        start, stop = (cue["y0"] - a) / scale, (cue["y1"] - a) / scale
+    clock = clock_from_dict(details)
+    base = clock.edge_to_time(b) if details["reverse"] else clock.edge_to_time(a)
+    first, second = sorted((clock.edge_to_time(cue["y0"]), clock.edge_to_time(cue["y1"])))
+    start, stop = first - base, second - base
+    estimated = clock.estimated_spans_between(cue["y0"], cue["y1"], base=base)
     return {"take": take["id"], "recipe": take["recipe_id"], "clock": details["source"],
-            "take_offsets": [round(start, 8), round(stop, 8)]}
+            "clock_mapping": details.get("mapping", "uniform"),
+            "take_offsets": [round(start, 8), round(stop, 8)],
+            "estimated": bool(estimated), "estimated_spans": estimated}
 
 
 def cue_coverage(cues, rows=None):
@@ -128,7 +130,7 @@ def original_span(take):
 
 def clip_cut(take, cues, requested, wave, rate):
     if requested is None:
-        return wave, tuple(original_span(take)), (0, len(wave)), None
+        return wave, tuple(original_span(take)), (0, len(wave)), None, []
     cue = cues.get(requested)
     if cue is None:
         raise Conflict("监听串联引用了该卷中不存在的审听标记。")
@@ -138,7 +140,13 @@ def clip_cut(take, cues, requested, wave, rate):
     at, stop = [max(0, min(len(wave), round(point * rate))) for point in position["take_offsets"]]
     if at >= stop:
         raise BenchError("标记小于当前监听输出中的一个样本。")
-    return wave[at:stop], (cue["y0"], cue["y1"]), (at, stop), cue
+    offset = at / rate
+    estimated = [{**span, "seconds": [round(max(0.0, span["seconds"][0] - offset), 7),
+                                      round(max(0.0, span["seconds"][1] - offset), 7)],
+                  "timecodes": [format_side_time(max(0.0, span["seconds"][0] - offset)),
+                                format_side_time(max(0.0, span["seconds"][1] - offset))]}
+                 for span in position["estimated_spans"]]
+    return wave[at:stop], (cue["y0"], cue["y1"]), (at, stop), cue, estimated
 
 
 def conform_clip(values, original_rate, appended_rate):
@@ -166,7 +174,7 @@ def expand_items(items, takes, cues, output_rate, continuous):
         if take["status"] != "reviewed":
             raise Conflict(f"监听“{take['title']}”须标记为已复核。")
         waves, rate = read_wav(take["wav"])
-        excerpt, rows, samples, cue = clip_cut(take, cues, item.cue_id, waves, rate)
+        excerpt, rows, samples, cue, estimate_spans = clip_cut(take, cues, item.cue_id, waves, rate)
         title = item.label or (cue["title"] if cue else take["title"])
         length = len(excerpt)
         if continuous:
@@ -189,7 +197,8 @@ def expand_items(items, takes, cues, output_rate, continuous):
         clip_manifest.append({"index": n, "title": title, "file": filename, "take": take["id"],
                               "take_sha256": take["wav_sha256"], "recipe_id": take["recipe_id"], "scan": take["scan_id"],
                               "cue_id": cue["id"] if cue else None, "source_rows": list(rows), "take_samples": list(samples),
-                              "clip_sample_rate": rate, "clip_frames": length, "continuous": timestamp})
+                              "clip_sample_rate": rate, "clip_frames": length,
+                              "estimated_spans": estimate_spans, "continuous": timestamp})
     if compiled:
         assets.append(("audio/continuous-review.wav", wav_bytes(np.concatenate(compiled), output_rate), "audio/wav", "continuous"))
     return clip_manifest, assets

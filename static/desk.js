@@ -35,7 +35,8 @@ function readinessSummary(state) {
         action('view-readiness','打开覆盖图')].join('');
     const sections = report.runs.map(run => {
         const warnings = run.multiple_read_clocks ? ' · 含多个读片时钟' : '';
-        return `<div class="record"><div style="flex:1"><strong>${esc(run.scan.title)}</strong><small>${percent(run.coverage.reviewed_fraction)} 行已复核 · ${run.cue_ready_count} 项可交付${warnings}</small>${rowCoverage(run.coverage,run.scan.height)}</div><div class="record-tools">${action('open-native','查看原片',{id:run.scan.id,row:0})}</div></div>`;
+        const estimated = run.estimated_takes ? ` · ${run.estimated_takes} 份监听含估算时间` : '';
+        return `<div class="record"><div style="flex:1"><strong>${esc(run.scan.title)}</strong><small>${percent(run.coverage.reviewed_fraction)} 行已复核 · ${run.cue_ready_count} 项可交付${warnings}${estimated}</small>${rowCoverage(run.coverage,run.scan.height)}</div><div class="record-tools">${action('open-native','查看原片',{id:run.scan.id,row:0})}</div></div>`;
     });
     return `<section class="box full"><h2>审听覆盖</h2>${metrics([['覆盖行数',`${fmt(report.reviewed_rows,0)} / ${fmt(report.all_native_rows,0)}`],['已保存监听',report.retained_takes],['待核标记',report.pending_cues],['可交付标记',report.ready_cues]])}<div class="data-list">${sections.join('') || '<p class="panel-note">尚未导入扫描。</p>'}</div><div class="form-footer">${controls}</div></section>`;
 }

@@ -42,7 +42,7 @@ class Material:
     def clock(self):
         setting = self.recipe.clock
         report = None
-        if setting.model == "perfs":
+        if setting.model in ("perfs", "local"):
             report = inspect_perfs(self.pixels, self.recipe.perforations, setting.pitch_guess)
         return establish_clock(setting, self.height, self.recipe.orientation.reverse_y, report), report
 
@@ -107,9 +107,26 @@ def render_audition(material, data):
               "clock": result.clock.as_dict(rows), "monitor": settings.as_dict(), "time_marks": clock_table(result.clock, rows),
               "perforations": perfs.as_dict(maximum=30) if perfs else None,
               "aperture": material.recipe.aperture.as_list(), "tone": material.recipe.tone.as_dict()}
+    if result.clock.local:
+        report["clock_rows"] = local_clock_rows(result.clock, rows)
     waves = waveform_envelope(result)
     curves = scan_trace(reading, size=340)
     return report, waves, curves, wav_bytes(result.wave, result.render_rate)
+
+
+def local_clock_rows(clock, rows):
+    top, bottom = rows
+    marks = []
+    for entry in clock.segments:
+        if entry.native_rows is None:
+            continue
+        low, high = entry.native_rows
+        if high < top or low > bottom:
+            continue
+        marks.append({"native_rows": [max(low, top), min(high, bottom)], "rate": round(entry.rate, 6),
+                      "trusted": entry.trusted})
+    marks.sort(key=lambda entry: entry["native_rows"][0])
+    return marks
 
 
 def make_reading(catalog, material, data):

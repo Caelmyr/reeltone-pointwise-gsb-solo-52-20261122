@@ -59,17 +59,25 @@ class Audition:
     dc: float
     monitor_clipping: int
     warnings: tuple[str, ...]
+    estimated: np.ndarray | None = None
 
     @property
     def duration(self):
         return len(self.wave) / self.render_rate
 
     def summary(self):
-        return {"duration_seconds": round(self.duration, 8), "source_rows": list(self.source_rows),
-                "output_rate": self.render_rate, "frames": len(self.wave), "channels": 1,
-                "row_rate": round(self.clock.rows_per_second, 6), "fixed_dc": round(self.dc, 6),
-                "monitor_clipping": self.monitor_clipping, "statistics": waveform_statistics(self.wave),
-                "warnings": [*self.clock.warnings, *self.warnings]}
+        clock = self.clock.as_dict(self.source_rows)
+        summary = {"duration_seconds": round(self.duration, 8), "source_rows": list(self.source_rows),
+                   "output_rate": self.render_rate, "frames": len(self.wave), "channels": 1,
+                   "row_rate": round(self.clock.rows_per_second, 6), "clock_mapping": clock["mapping"],
+                   "fixed_dc": round(self.dc, 6),
+                   "monitor_clipping": self.monitor_clipping, "statistics": waveform_statistics(self.wave),
+                   "warnings": [*self.clock.warnings, *self.warnings]}
+        if self.clock.local:
+            summary["local_rate_range"] = clock["local_rate_range"]
+            summary["estimated_spans"] = clock["estimated_spans_in_range"]
+            summary["estimated_seconds"] = clock["estimated_seconds"]
+        return summary
 
 
 def waveform_statistics(values):
@@ -132,6 +140,31 @@ def retime(filtered, row_rate, output_rate):
     return resampled[:needed]
 
 
+def local_timeline(clock: RowClock, rows, output_rate):
+    """Playback sample positions for a locally-timed excerpt and its estimate cover.
+
+    Positions follow the saved clock mapping, not a single row rate, so the
+    waveform's row markers, cue offsets and package cuts all agree.
+    """
+    top, bottom = rows
+    samples = max(1, round(clock.duration(rows) * output_rate))
+    if samples > output_rate * MAX_MONITOR_SECONDS:
+        raise BenchError(f"一次试听最多 {MAX_MONITOR_SECONDS} 秒。缩小原片行区间后重试。")
+    start_time = min(clock.edge_to_time(top), clock.edge_to_time(bottom))
+    forward_start = clock.native_height - bottom if clock.reverse else top
+    times = start_time + np.arange(samples, dtype=np.float64) / output_rate
+    indexes = clock.forward_at_time(times) - forward_start
+    indexes = np.clip(indexes, 0.0, float(bottom - top - 1))
+    return indexes, estimated_mask(clock, rows, output_rate, samples)
+
+
+def retime_local(filtered, clock: RowClock, rows, output_rate):
+    indexes, covered = local_timeline(clock, rows, output_rate)
+    positions = np.arange(len(filtered), dtype=np.float64)
+    resampled = np.interp(indexes, positions, filtered)
+    return resampled, covered
+
+
 def apply_fade(values, count):
     if count < 2:
         return values
@@ -144,6 +177,8 @@ def apply_fade(values, count):
 
 def audition(read: OpticalRead, clock: RowClock, options: Monitor):
     scan, center = normalize_signal(read, options, clock)
+    if clock.local:
+        return audition_local(read, scan, clock, options, center)
     if len(scan) / clock.rows_per_second > MAX_MONITOR_SECONDS:
         raise BenchError(f"一次试听最多 {MAX_MONITOR_SECONDS} 秒。缩小原片行区间后重试。")
     filtered, warnings = shaping_filter(scan, clock.rows_per_second, options)
@@ -157,6 +192,56 @@ def audition(read: OpticalRead, clock: RowClock, options: Monitor):
     if options.rate > clock.rows_per_second * 1.8:
         warnings.append("WAV 的扩展采样率不增加原扫描的可恢复带宽。")
     return Audition(faded, scan, options.rate, read.source_rows, clock, options, center, clipping, tuple(warnings))
+
+
+def audition_local(read: OpticalRead, scan, clock: RowClock, options: Monitor, center):
+    if clock.duration(read.source_rows) > MAX_MONITOR_SECONDS:
+        raise BenchError(f"一次试听最多 {MAX_MONITOR_SECONDS} 秒。缩小原片行区间后重试。")
+    rows = read.source_rows
+    rate_low, rate_high = clock.rate_range(rows)
+    processed, estimated = retime_local(scan, clock, rows, options.rate)
+    if options.low_hz >= rate_low / 2 * 0.80:
+        raise BenchError("高通频率超过该片段局部齿孔节奏的原生采样能力。")
+    warnings = []
+    filtered = processed
+    if len(processed) >= 16:
+        filtered = shape_after_retime(processed, options, warnings)
+    elif options.high_hz > 0 or options.low_hz > 0:
+        warnings.append("所选片段过短，略过监试听滤波。")
+    filtered *= 10.0 ** (options.gain_db / 20.0)
+    n_ramp = min(len(filtered) // 2, round(options.rate * options.ramp_ms / 1000.0))
+    faded = apply_fade(filtered, n_ramp)
+    clipping = int(np.count_nonzero(np.abs(faded) > 1.0))
+    if clipping:
+        warnings.append(f"试听增益造成 {clipping} 个样本超出 WAV 满幅。可降低增益。")
+    if options.rate > rate_high * 1.8:
+        warnings.append("WAV 的扩展采样率不增加原扫描的可恢复带宽。")
+    if estimated.any():
+        warnings.append("片段内有齿孔节奏无法确认的区段，波形上的浅色带为估算时间。")
+    return Audition(faded, scan, options.rate, rows, clock, options, center, clipping, tuple(warnings), estimated)
+
+
+def shape_after_retime(values, options, warnings):
+    """Apply the monitor band limits at the output rate.
+
+    Local perforation pace re-times each stretch separately, so the shaping
+    happens on the rendered timeline where one sample rate applies throughout.
+    """
+    low = options.low_hz or None
+    high = options.high_hz or None
+    if low is None and high is None:
+        return values.copy()
+    nyquist = options.rate / 2
+    if high is not None and high >= nyquist * 0.95:
+        warnings.append("低通设置超出了源行速带宽，已保留源信号的可用带宽。")
+        high = None
+    if low is not None and high is not None:
+        coefficients = signal.butter(2, (low, high), "bandpass", fs=options.rate, output="sos")
+    elif low is not None:
+        coefficients = signal.butter(2, low, "highpass", fs=options.rate, output="sos")
+    else:
+        coefficients = signal.butter(2, high, "lowpass", fs=options.rate, output="sos")
+    return signal.sosfiltfilt(coefficients, values, padlen=min(24, len(values) - 1))
 
 
 def wav_bytes(values, sample_rate):
@@ -197,17 +282,37 @@ def read_wav(data, max_duration=MAX_MONITOR_SECONDS):
 
 
 def waveform_envelope(result: Audition, size=600):
-    data = result.wave
+    return envelope_for(result.wave, result.render_rate, result.clock, result.source_rows, result.estimated, size)
+
+
+def estimated_mask(clock: RowClock, rows, rate, samples):
+    covered = np.zeros(samples, dtype=bool)
+    if not clock.local:
+        return covered
+    start_time = min(clock.edge_to_time(rows[0]), clock.edge_to_time(rows[1]))
+    for span in clock.estimated_spans_between(*rows, base=start_time):
+        first = max(0, int(np.floor(span["seconds"][0] * rate)) - 1)
+        stop = min(samples, int(np.ceil(span["seconds"][1] * rate)) + 1)
+        if first < stop:
+            covered[first:stop] = True
+    return covered
+
+
+def envelope_for(wave, rate, clock: RowClock, rows, estimated=None, size=600):
+    data = wave
     bounds = np.linspace(0, len(data), min(len(data), size) + 1, dtype=int)
-    start_time, _ = result.clock.extent(result.source_rows)
+    start_time, _ = clock.extent(rows)
+    if estimated is None:
+        estimated = estimated_mask(clock, rows, rate, len(data))
     output = []
     for first, stop in zip(bounds[:-1], bounds[1:]):
         values = data[first:stop]
-        time0 = start_time + first / result.render_rate
-        time1 = start_time + stop / result.render_rate
-        native_edges = result.clock.native_center_at_time([time0, time1])
-        output.append({"samples": [int(first), int(stop)], "start_seconds": round(first / result.render_rate, 7),
+        time0 = start_time + first / rate
+        time1 = start_time + stop / rate
+        native_edges = np.atleast_1d(clock.native_center_at_time([time0, time1]))
+        output.append({"samples": [int(first), int(stop)], "start_seconds": round(first / rate, 7),
                        "source_edges": [round(float(edge), 3) for edge in native_edges],
+                       "estimated": bool(estimated[first:stop].any()),
                        "low": round(float(values.min()), 5), "high": round(float(values.max()), 5),
                        "rms": round(float(np.sqrt(np.mean(values ** 2))), 5)})
     return output

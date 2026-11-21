@@ -80,8 +80,14 @@ def take_row(take, max_rows):
         raise Conflict("监听快照的原片行范围超出了扫描高度。")
     meta = take["payload"]["clock"]
     notices = take["payload"]["audio"].get("warnings", [])
+    estimated = meta.get("estimated_spans_in_range", []) if meta.get("mapping") == "local_perforation" else []
+    if meta.get("mapping") == "local_perforation":
+        notices = [*notices]
+        if estimated:
+            notices.append(f"该监听有 {len(estimated)} 段齿孔节奏无法确认，相应时间为估算。")
     return {"id": take["id"], "title": take["title"], "status": take["status"], "rows": list(footprint),
-            "rate": meta["rows_per_second"], "clock": meta["source"], "reverse": bool(meta["reverse"]),
+            "rate": meta["rows_per_second"], "clock": meta["source"], "clock_mapping": meta.get("mapping", "uniform"),
+            "reverse": bool(meta["reverse"]), "estimated_spans": estimated,
             "duration": take["payload"]["audio"]["duration_seconds"], "warnings": list(notices),
             "recipe_id": take["recipe_id"], "wav_sha256": take["wav_sha256"], "recorded_at": take["created"]}
 
@@ -133,11 +139,13 @@ def scan_review(scan, takes, cues, proofs):
     proof_types = defaultdict(int)
     for proof in proofs:
         proof_types[proof["category"]] += 1
-    alternate_clock = len({(row["rate"], row["reverse"]) for row in native_takes if row["status"] == "reviewed"}) > 1
+    alternate_clock = len({(row["clock_mapping"], row["rate"], row["reverse"])
+                           for row in native_takes if row["status"] == "reviewed"}) > 1
     return {"scan": {"id": scan["id"], "title": scan["title"], "sha256": scan["sha256"], "height": total},
             "coverage": coverage, "takes": native_takes, "cues": cue_summary, "proof_types": dict(proof_types),
             "cue_ready_count": len(verified_ranges), "cue_open_count": len(open_ranges),
-            "held_takes": sum(row["status"] == "hold" for row in native_takes), "multiple_read_clocks": alternate_clock}
+            "held_takes": sum(row["status"] == "hold" for row in native_takes), "multiple_read_clocks": alternate_clock,
+            "estimated_takes": sum(bool(row["estimated_spans"]) for row in native_takes)}
 
 
 def rollup(reel, scan_rows):
@@ -190,11 +198,13 @@ def transfer_html(report):
         if run["multiple_read_clocks"]:
             document.append('<p class="warn">已复核的监听使用多个时间基准；以上仅比较原片行覆盖。</p>')
         if run["takes"]:
-            document.append('<table><thead><tr><th>监听</th><th>状态</th><th>原片行</th><th>秒</th></tr></thead><tbody>')
+            document.append('<table><thead><tr><th>监听</th><th>状态</th><th>原片行</th><th>秒</th><th>定时</th></tr></thead><tbody>')
             for take in run["takes"]:
                 a, b = take["rows"]
+                note = "估算" if take.get("estimated_spans") else (
+                    "局部齿孔" if take.get("clock_mapping") == "local_perforation" else "统一")
                 document.append(f'<tr><td>{e(take["title"])}</td><td>{e(take["status"])}</td><td>{a}–{b}</td>'
-                                f'<td>{e(format_side_time(take["duration"]))}</td></tr>')
+                                f'<td>{e(format_side_time(take["duration"]))}</td><td>{e(note)}</td></tr>')
             document.append('</tbody></table>')
         if run["cues"]:
             document.append('<table><thead><tr><th>标记</th><th>原片行</th><th>可用性</th><th>提示</th></tr></thead><tbody>')

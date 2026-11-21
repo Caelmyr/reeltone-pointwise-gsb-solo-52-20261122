@@ -40,12 +40,12 @@ class ClockSetting:
     @classmethod
     def parse(cls, raw):
         values = mapping(raw, "时间基准")
-        model = option(values.get("model", "manual"), ("manual", "perfs"), "时间基准")
+        model = option(values.get("model", "manual"), ("manual", "perfs", "local"), "时间基准")
         rate = real(values.get("row_rate", 6_000), "每秒扫描行", 100, 96_000)
         fps = real(values.get("frames_per_second", 24), "每秒画格", 8, 60)
         holes = integer(values.get("holes_per_frame", 1), "每格齿孔", 1, 12)
         pitch = real(values.get("pitch_guess", 250), "预估齿孔间距", 8, 5_000)
-        if model == "perfs" and not 100 <= pitch * fps * holes <= 96_000:
+        if model in ("perfs", "local") and not 100 <= pitch * fps * holes <= 96_000:
             raise BenchError("齿孔间距和画格速率的组合须对应 100–96,000 行/秒。")
         return cls(model, rate, fps, holes, pitch)
 

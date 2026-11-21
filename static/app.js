@@ -18,7 +18,7 @@ function drawWorkspace() {
     $('#workspace').innerHTML = state.workspace==='desk' ? deskPage(state) : filmPage(state);
     if (state.workspace==='scan' && state.scan) {
         connectFilm(state,windowStart,onFilmSelection);
-        waveCanvas(state.result?.waveform,bin=>windowStart(Math.floor(bin.source_edges[0])-Math.floor(state.frame.rows/2)));
+        waveCanvas(state.result?.waveform,bin=>jumpToSourceRow(bin.source_edges[0]));
     }
 }
 function draw() { drawLibrary(); drawWorkspace(); drawSettings(); }
@@ -29,9 +29,13 @@ function onFilmSelection() {
     if (state.panel==='tools' || state.panel==='read') drawSettings();
 }
 function windowStart(start) {
-    state.frame.start = start;
-    state.frame.start = filmSpan(state)[0];
+    state.frame.start = Math.max(0, Math.round(start));
     drawWorkspace();
+}
+function jumpToSourceRow(nativeRow) {
+    const height = state.scan.scan.metadata.height;
+    const row = Math.max(0, Math.min(height-1, Math.round(Number(nativeRow) || 0)));
+    windowStart(row - Math.floor(state.frame.rows/2));
 }
 function transport(audio) {
     const current = $('#transport');
@@ -219,7 +223,7 @@ function viewProof(resultData) {
 
 function originalJump(data) {
     closeModal();
-    return openScan(data.id,data.recipe || null,{workspace:true}).then(()=>windowStart(Number(data.row || 0)));
+    return openScan(data.id,data.recipe || null,{workspace:true}).then(()=>jumpToSourceRow(Number(data.row || 0)));
 }
 
 function openContact() {
@@ -240,7 +244,7 @@ function jumpCue(id, edit) {
     if (!cue) return;
     return openScan(cue.scan_id,null,{workspace:!edit}).then(()=>{
         if (edit) {state.modalData={cue};modal('编辑审听标记',cueForm(state,cue));}
-        else windowStart(cue.y0);
+        else jumpToSourceRow(cue.y0);
     });
 }
 
@@ -281,7 +285,7 @@ const commands = {
         boxInputs('box',currentBox(state),'原片位置')+textarea('note','说明','',600),submit('保存定位框'))),
     'open-marker':async data=>{
         const found=await post(scanURL(state.scan.scan.id,'/marker-view'),{marker:data.id,recipe:state.scan.recipe.id});
-        const box=found.source_box;state.frame.selection=box;windowStart(box[1]);closeModal();notice(`已定位「${found.marker.title}」。`);
+        const box=found.source_box;state.frame.selection=box;jumpToSourceRow(box[1]);closeModal();notice(`已定位「${found.marker.title}」。`);
     },
     'history':async ()=>modal('读片历史',auditStubHistory((await request(scanURL(state.scan.scan.id,'/recipes'))).recipes)),
     'view-recipe':data=>{closeModal();return openScan(state.scan.scan.id,data.id,{keepPosition:true});},
@@ -296,7 +300,11 @@ const commands = {
         state.listenRows=[state.frame.selection[1],state.frame.selection[3]];drawSettings();
     },
     'save-take':()=>retainTake($('#listen-form'),true),
-    'open-take':async data=>{const got=await request(`/api/takes/${data.id}`);modal(got.record.title,readingDetails(got));},
+    'open-take':async data=>{
+        const got=await request(`/api/takes/${data.id}`);
+        modal(got.record.title,readingDetails(got));
+        waveCanvas(got.waveform,bin=>{closeModal();jumpToSourceRow(bin.source_edges[0]);});
+    },
     'open-proof':async data=>viewProof(await request(`/api/proofs/${data.id}`)),
     'set-take':async data=>{
         const out=await post(`/api/takes/${data.id}/status`,{status:data.state});

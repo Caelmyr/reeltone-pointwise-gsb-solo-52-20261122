@@ -91,8 +91,9 @@ def review_sections(values, rate, *, quiet_db=-42, sample_ms=50):
             "limit_seconds": group(loud, 1), "sections": sections}
 
 
-def narrowband_profile(values, rate, clock, choice):
+def narrowband_profile(values, rate, clock, choice, rows=None):
     window = {"compact": 256, "standard": 512, "detail": 1024}[choice]
-    spectrum = analyze_signal(values, rate, clock.rows_per_second, window)
+    source_rate = clock.rate_range(rows)[0] if clock.local and rows else clock.rows_per_second
+    spectrum = analyze_signal(values, rate, source_rate, window)
     return spectrum, {"spectrum": spectrum.summary(), "frequency_profile": spectrum.profile(),
                       "review_windows": review_sections(values, rate)}

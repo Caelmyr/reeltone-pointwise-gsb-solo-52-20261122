@@ -1,12 +1,13 @@
 from hashlib import sha256
 
-from .audition import read_wav, waveform_statistics
+from .audition import envelope_for, read_wav, waveform_statistics
 from .bench import load_material
 from .contracts import identifier, mapping, text
 from .cues import PacketRequest, parse_cue, validate_cue_anchor
 from .errors import Conflict
 from .packet import make_packet
 from .store import Catalog
+from .timing import clock_from_dict
 
 
 def current_take_properties(catalog, take_id):
@@ -21,9 +22,11 @@ def current_take_properties(catalog, take_id):
     metadata = record["payload"]["audio"]
     checks["length"] = metadata["frames"] == len(samples)
     checks["rate"] = metadata["output_rate"] == rate
+    clock = clock_from_dict(record["payload"]["clock"])
+    waveform = envelope_for(samples, rate, clock, metadata["source_rows"])
     return {"record": record, "source": source, "recipe": recipe, "verified": all(checks.values()),
             "integrity": checks, "retained_pcm_statistics": waveform_statistics(samples),
-            "duration_seconds": round(len(samples) / rate, 8)}
+            "duration_seconds": round(len(samples) / rate, 8), "waveform": waveform}
 
 
 def current_proof_properties(catalog, proof_id):

@@ -67,14 +67,18 @@ def cue_document(scan_index, cues):
 
 def clip_document(positions, scans):
     header = ("item", "title", "audio", "scanner_source", "source_sha256", "first_row", "after_last_row", "take_id",
-              "take_sample_start", "take_sample_stop", "audition_rate_hz", "playback_start", "playback_stop")
+              "take_sample_start", "take_sample_stop", "audition_rate_hz", "playback_start", "playback_stop",
+              "estimated_time_spans")
     rows = [header]
     for clip in positions:
         source = scans[clip["scan"]]
         movie = clip["continuous"]
         time = movie["timecodes"] if movie else ("", "")
+        estimated = " ".join(f"{span['native_rows'][0]}-{span['native_rows'][1]}"
+                             for span in clip.get("estimated_spans") or ())
         rows.append((clip["index"], clip["title"], clip["file"], source["title"], source["sha256"],
-                     *clip["source_rows"], clip["take"], *clip["take_samples"], clip["clip_sample_rate"], *time))
+                     *clip["source_rows"], clip["take"], *clip["take_samples"], clip["clip_sample_rate"], *time,
+                     estimated))
     return csv_bytes(rows)
 
 
@@ -93,12 +97,16 @@ def print_document(reel, title, clips, proofs, cues, already):
         f"<p><small>{esc(already)}</small></p></header>",
     ]
     if clips:
-        paper.append("<h2>监听顺序</h2><table><thead><tr><th>片段</th><th>原片行区间</th><th>串听起止</th></tr></thead><tbody>")
+        paper.append("<h2>监听顺序</h2><table><thead><tr><th>片段</th><th>原片行区间</th><th>串听起止</th><th>时间依据</th></tr></thead><tbody>")
         for clip in clips:
             start, stop = clip["source_rows"]
             label = f"{clip['index']}. {clip['title']}"
             playback = " – ".join(clip["continuous"]["timecodes"]) if clip["continuous"] else "独立 WAV"
-            paper.append(f"<tr><td><a href='{esc(clip['file'])}'>{esc(label)}</a></td><td>{start} ≤ 行 &lt; {stop}</td><td>{esc(playback)}</td></tr>")
+            estimated = clip.get("estimated_spans") or []
+            basis = ("含估算：" + "、".join(f"{span['native_rows'][0]}–{span['native_rows'][1]}" for span in estimated)
+                     + " 行") if estimated else "按保存时的定时映射"
+            paper.append(f"<tr><td><a href='{esc(clip['file'])}'>{esc(label)}</a></td><td>{start} ≤ 行 &lt; {stop}</td>"
+                         f"<td>{esc(playback)}</td><td>{esc(basis)}</td></tr>")
         paper.append("</tbody></table>")
     if proofs:
         paper.append("<h2>图像证据</h2>")

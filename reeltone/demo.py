@@ -208,7 +208,8 @@ def sample_recipe(sample):
     settings = {"aperture": track, "perforations": perf,
                 "orientation": {"mirror_x": sample.mirror, "reverse_y": sample.reverse},
                 "tone": {"black": 0.12, "white": 0.84 if sample.negative else 0.86, "polarity": "dark" if sample.negative else "clear"},
-                "clock": {"model": "perfs", "pitch_guess": sample.pitch, "row_rate": sample.row_rate,
+                "clock": {"model": "local" if sample.variant == "speed" else "perfs",
+                          "pitch_guess": sample.pitch, "row_rate": sample.row_rate,
                           "frames_per_second": 24, "holes_per_frame": 4 if sample.gauge == "35 mm" else 1}}
     return Recipe.parse(settings, sample.width)
 

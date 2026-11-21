@@ -68,7 +68,10 @@ class SampleDiff:
 
 def clock_key(payload):
     fields = payload["clock"]
-    return fields["native_height"], fields["rows_per_second"], fields["reverse"], tuple(fields["source_rows"])
+    segments = tuple((entry.get("native_rows") and tuple(entry["native_rows"]), entry.get("rate"), entry.get("trusted"))
+                     for entry in fields.get("local_segments") or ())
+    return (fields["native_height"], fields["rows_per_second"], fields["reverse"], tuple(fields["source_rows"]),
+            fields.get("mapping", "uniform"), segments)
 
 
 def compare_waveforms(first_wave, new_wave, old_read, new_read, request):

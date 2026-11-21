@@ -7,6 +7,7 @@ from scipy import signal
 from .audition import RATES, read_wav, wav_bytes, waveform_statistics
 from .contracts import identifier, integer, mapping, option, real
 from .errors import BenchError, Conflict, Limit
+from .timing import clock_from_dict
 from .visual import ACCENT, BLUE, TEAL, PlotSeries, line_plot
 
 
@@ -19,6 +20,7 @@ class MonitorProvenance:
     rate: int
     rows_per_second: float
     reverse: bool
+    clock: object
     waveform: np.ndarray
     origin: str
 
@@ -37,20 +39,23 @@ class MonitorProvenance:
             raise Conflict("监听快照记录的采样时标与文件不一致。")
         rail = stored["payload"]["aperture"]
         return cls(stored["id"], stored["recipe_id"], tuple(sound["source_rows"]), tuple(rail), rate, clock["rows_per_second"],
-                   clock["reverse"], wave, stored["wav_sha256"])
+                   clock["reverse"], clock_from_dict(clock), wave, stored["wav_sha256"])
 
     def describe(self):
         return {"take": self.id, "recipe": self.recipe_id, "source_rows": list(self.source_rows), "guide": list(self.track),
-                "rate": self.rate, "reverse": self.reverse, "rows_per_second": self.rows_per_second, "wav_sha256": self.origin}
+                "rate": self.rate, "reverse": self.reverse, "rows_per_second": self.rows_per_second,
+                "clock_mapping": "local_perforation" if self.clock.local else "uniform",
+                "wav_sha256": self.origin}
 
     def sample_for_row_center(self, location):
         lo, hi = self.source_rows
-        distance = hi - location if self.reverse else location - lo
-        return distance * self.rate / self.rows_per_second - 0.5
+        start = self.clock.edge_to_time(hi if self.reverse else lo)
+        return (self.clock.edge_to_time(location) - start) * self.rate - 0.5
 
     def filter_for_grid(self, overlap, grid_count):
         span = overlap[1] - overlap[0]
-        input_samples_per_row = self.rate / self.rows_per_second
+        duration = self.clock.duration(overlap)
+        input_samples_per_row = self.rate * duration / span if span else self.rate / self.rows_per_second
         output_samples_per_row = grid_count / span
         ratio = output_samples_per_row / input_samples_per_row
         if ratio > 0.98 or len(self.waveform) < 23:
@@ -143,7 +148,7 @@ def make_pair(a, b, count_limit, rate, gain_mode, gain_cap, requested=None):
         raise BenchError("请选择两份不同的监听快照。")
     common = intersect_rows(a, b, requested)
     lo, hi = common
-    count = max(1, round((hi - lo) * rate / a.rows_per_second))
+    count = max(1, round(a.clock.duration(common) * rate))
     if count > count_limit:
         raise Limit("双耳对听最多包含 16 秒的共同扫描区间。")
     if count < 8:
