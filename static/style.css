@@ -206,3 +206,11 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   .playqueue { overflow-x: auto; }
   .playlist-item { min-width: 480px; }
 }
+.join-candidates { display: grid; gap: 8px; margin: 10px 0; }
+.join-candidate { align-items: start; background: #1b2530; border: 1px solid #2f404e; border-radius: 7px; padding: 10px 12px; }
+.join-candidate input { margin-top: 3px; }
+.join-candidate span { display: grid; gap: 3px; }
+.join-candidate small { color: var(--muted); font-family: var(--mono); }
+#join-step .form-footer { margin-top: 12px; }
+#modal .table-wrap { max-height: 320px; overflow: auto; }
+#modal .data-table td, #modal .data-table th { font-size: 12px; padding: 7px 8px; }

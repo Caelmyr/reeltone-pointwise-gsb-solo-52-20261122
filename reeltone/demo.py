@@ -44,6 +44,106 @@ DEMO_REELS = (
 )
 
 
+# --- Interrupted-scan overlap practice reel ----------------------------------
+# A single master strip is rendered, then split into two same-direction passes
+# that share a longitudinal overlap.  Each pass gets its own dust and scratches
+# so the clarity-aware seam planning has something to decide between.
+JOIN_WIDTH = 220
+JOIN_ROW_RATE = 7200
+JOIN_PITCH = 300
+JOIN_MASTER_ROWS = 11200
+JOIN_SPLIT = 6400          # head covers master rows 0..JOIN_SPLIT+overlap-...
+JOIN_OVERLAP = 2600        # shared physical rows between the two passes
+
+
+def _join_master(seed):
+    rng = np.random.default_rng(seed)
+    rows = JOIN_MASTER_ROWS
+    r = np.arange(rows, dtype=np.float64)
+    t = r / JOIN_ROW_RATE
+    carrier = np.sin(2 * np.pi * (305 * t + 42 * t ** 2))
+    notes = 0.28 * np.sin(2 * np.pi * 612 * t + 0.4)
+    envelope = np.clip(np.sin(np.pi * np.clip(t / 1.42, 0, 1)) ** 2, 0, 1)
+    wave = np.clip((0.66 * carrier + notes) * envelope + 0.18 * np.sin(2 * np.pi * 440 * t), -0.9, 0.9)
+    width = JOIN_WIDTH
+    image = np.full((rows, width), 0.24, dtype=np.float32)
+    x = np.arange(width, dtype=np.float64)
+    x0, x1 = round(width * 0.24), round(width * 0.62)
+    center = 0.5 * (x0 + x1) + 0.5 * np.sin(r / 420)[:, None]
+    semi = ((x1 - x0) * (0.235 + 0.14 * wave))[:, None]
+    strength = np.clip((semi + 0.7 - np.abs(x[None, :] - center)) / 1.4, 0, 1)
+    base = 0.14 + 0.01 * rng.normal(size=(rows, 1))
+    image[:] = base + strength * (0.86 - base)
+    # Perforation band on the left, uniform pitch.
+    perf0, perf1 = 4, round(width * 0.13)
+    for hole in np.arange(JOIN_PITCH * 0.5, rows, JOIN_PITCH):
+        a, b = max(0, int(hole - JOIN_PITCH * 0.18)), min(rows, int(hole + JOIN_PITCH * 0.18))
+        image[a:b, perf0:perf1] = 0.95
+    image += rng.normal(0, 0.01, image.shape).astype(np.float32)
+    return np.clip(image, 0, 1).astype(np.float32), (x0, x1), (perf0, perf1)
+
+
+def _add_join_defects(image, rng, *, scratch_column, dust_rows):
+    rows, width = image.shape
+    # A longitudinal scratch that darkens a narrow column band.
+    image[:, scratch_column:scratch_column + 3] *= 0.25
+    for row in dust_rows:
+        radius = int(rng.integers(2, 6))
+        a, b = max(0, row - radius), min(rows, row + radius)
+        col = int(rng.integers(width // 4, width * 3 // 4))
+        image[a:b, max(0, col - radius):min(width, col + radius)] = rng.choice([0.05, 0.97])
+
+
+def join_practice_samples():
+    master, track, perf = _join_master(9021)
+    rng_head = np.random.default_rng(301)
+    rng_tail = np.random.default_rng(407)
+    head_stop = JOIN_SPLIT + JOIN_OVERLAP            # master rows [0, head_stop)
+    tail_start = JOIN_SPLIT                          # master rows [tail_start, end)
+    head = master[:head_stop].copy()
+    tail = master[tail_start:].copy()
+    # Defects inside the shared region, at different physical rows on each pass.
+    _add_join_defects(head, rng_head, scratch_column=track[0] + 12,
+                      dust_rows=list(range(JOIN_SPLIT + 400, JOIN_SPLIT + 460, 7)) +
+                      list(range(JOIN_SPLIT + 1500, JOIN_SPLIT + 1560, 9)))
+    _add_join_defects(tail, rng_tail, scratch_column=track[0] + 30,
+                      dust_rows=list(range(900, 980, 8)) + list(range(1900, 1970, 7)))
+    common = FilmSample("断接练习 · 片头扫描", "interrupted-head.png",
+                        "合成的停机前段扫描，与片尾扫描同向、同宽，重叠约 2600 行；重叠内有落灰和纵向刮伤。",
+                        JOIN_WIDTH, head_stop, JOIN_ROW_RATE, JOIN_PITCH, "16 mm", 9021, "join_head")
+    tail_sample = FilmSample("断接练习 · 片尾扫描", "interrupted-tail.png",
+                             "合成的复扫后段，与片头扫描共享一段重叠并各自带有不同瑕疵，用于确认清晰度选源。",
+                             JOIN_WIDTH, JOIN_MASTER_ROWS - tail_start, JOIN_ROW_RATE, JOIN_PITCH,
+                             "16 mm", 9021, "join_tail")
+    return common, tail_sample, head, tail, track, perf
+
+
+JOIN_REEL_META = {"title": "停机断接（合成）", "accession": "RT-LAB-052-C", "gauge": "16 mm",
+                  "note": "同一卷中途停机后的两张同向、同宽扫描，共享一段纵向重叠且各有落灰刮伤。用于练习重叠对齐、清晰度选源和无重复接续。",
+                  "demo_key": "join-v1"}
+
+
+def seed_join_reel(catalog):
+    previous = catalog.demo_reel(JOIN_REEL_META["demo_key"])
+    if previous:
+        return catalog.get_reel(previous), False
+    head_sample, tail_sample, head_image, tail_image, track, perf = join_practice_samples()
+    settings = {"aperture": list(track), "perforations": list(perf),
+                "orientation": {"mirror_x": False, "reverse_y": False},
+                "tone": {"black": 0.12, "white": 0.86, "threshold": 0.5, "polarity": "clear"},
+                "clock": {"model": "perfs", "pitch_guess": JOIN_PITCH, "row_rate": JOIN_ROW_RATE,
+                          "frames_per_second": 24, "holes_per_frame": 1}}
+    recipe = Recipe.parse(settings, JOIN_WIDTH)
+    drafts = [
+        {"raster": read_scan(encode_png(head_image, bits=16), head_sample.filename),
+         "title": head_sample.name, "note": head_sample.note, "recipe": recipe},
+        {"raster": read_scan(encode_png(tail_image, bits=16), tail_sample.filename),
+         "title": tail_sample.name, "note": tail_sample.note, "recipe": recipe},
+    ]
+    record, fresh = catalog.seed_reel(JOIN_REEL_META, drafts)
+    return record, fresh
+
+
 def attack_envelope(t, onset, release, rise, fall):
     opening = np.clip((t - onset) / rise, 0, 1)
     closing = np.clip((release - t) / fall, 0, 1)
@@ -227,4 +327,6 @@ def seed_library(catalog):
                            "recipe": sample_recipe(sample)})
         record, fresh = catalog.seed_reel(reel, drafts)
         results.append({"reel": record, "added": fresh, "scans": catalog.list_scans(record["id"])})
+    join_record, join_fresh = seed_join_reel(catalog)
+    results.append({"reel": join_record, "added": join_fresh, "scans": catalog.list_scans(join_record["id"])})
     return {"training": results, "scan_count": sum(len(row["scans"]) for row in results), "synthetic": True}

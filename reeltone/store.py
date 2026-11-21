@@ -18,6 +18,7 @@ PROOF_LIMIT = 100
 CUE_LIMIT = 100
 RECIPE_HISTORY_LIMIT = 200
 PACKET_LIMIT = 30
+JOIN_LIMIT = 24
 MAX_NAMED_RANGES = 120
 
 
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS scans (
     raw BLOB NOT NULL,
     metadata TEXT NOT NULL,
     sha256 TEXT NOT NULL,
+    origin_kind TEXT NOT NULL DEFAULT 'imported',
     created TEXT NOT NULL,
     UNIQUE(reel_id, sha256)
 );
@@ -115,6 +117,16 @@ CREATE TABLE IF NOT EXISTS markers (
     notes TEXT NOT NULL,
     created TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS joins (
+    id TEXT PRIMARY KEY,
+    reel_id TEXT NOT NULL REFERENCES reels(id),
+    output_scan_id TEXT NOT NULL REFERENCES scans(id),
+    head_scan_id TEXT NOT NULL REFERENCES scans(id),
+    tail_scan_id TEXT NOT NULL REFERENCES scans(id),
+    title TEXT NOT NULL,
+    manifest TEXT NOT NULL,
+    created TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     reel_id TEXT NOT NULL REFERENCES reels(id),
@@ -131,17 +143,24 @@ CREATE INDEX IF NOT EXISTS proofs_by_scan ON proofs(scan_id, created DESC);
 CREATE INDEX IF NOT EXISTS cues_by_reel ON cues(reel_id, scan_id, y0, y1);
 CREATE INDEX IF NOT EXISTS packets_by_reel ON packets(reel_id, created DESC);
 CREATE INDEX IF NOT EXISTS markers_by_scan ON markers(scan_id, created DESC);
+CREATE INDEX IF NOT EXISTS joins_by_reel ON joins(reel_id, created DESC);
 CREATE INDEX IF NOT EXISTS events_by_reel ON events(reel_id, id DESC);
 """
 
+MIGRATIONS = (
+    # 1.0 libraries predate the origin_kind column; default keeps old scans imports.
+    "ALTER TABLE scans ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'imported'",
+)
+
 REEL_FIELDS = "id,title,accession,gauge,note,synthetic,demo_key,created,updated"
-SCAN_FIELDS = "id,reel_id,title,source_note,metadata,sha256,created"
+SCAN_FIELDS = "id,reel_id,title,source_note,metadata,sha256,origin_kind,created"
 RECIPE_FIELDS = "id,scan_id,seq,settings,fingerprint,label,theme,created"
 TAKE_FIELDS = "id,scan_id,recipe_id,title,settings,payload,status,wav_sha256,created,updated"
 PROOF_FIELDS = "id,scan_id,recipe_id,title,category,note,evidence,primary_sha256,secondary_sha256,created"
 CUE_FIELDS = "id,reel_id,scan_id,title,kind,status,y0,y1,anchor,note,created,updated"
 PACKET_FIELDS = "id,reel_id,title,filename,summary,sha256,created"
 MARKER_FIELDS = "id,scan_id,title,kind,display,notes,created"
+JOIN_FIELDS = "id,reel_id,output_scan_id,head_scan_id,tail_scan_id,title,manifest,created"
 
 GAUGES = ("16 mm", "35 mm", "Other")
 RECIPE_THEMES = ("intake", "manual", "restored", "reference")
@@ -202,6 +221,12 @@ class Catalog:
         with self.database() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(SCHEMA)
+            self._migrate(connection)
+
+    def _migrate(self, connection):
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(scans)")}
+        if "origin_kind" not in columns:
+            connection.execute(MIGRATIONS[0])
 
     @contextmanager
     def database(self, write=False):
@@ -292,7 +317,7 @@ class Catalog:
             rows = connection.execute(f"SELECT {SCAN_FIELDS} FROM scans WHERE reel_id=? ORDER BY created,id", (reel,))
             return [deserialize(row, ("metadata",)) for row in rows]
 
-    def _insert_scan(self, connection, reel, *, raster, title, note, recipe):
+    def _insert_scan(self, connection, reel, *, raster, title, note, recipe, origin_kind="imported"):
         previous = connection.execute("SELECT id FROM scans WHERE reel_id=? AND sha256=?", (reel, raster.digest)).fetchone()
         if previous:
             return previous["id"], False
@@ -301,9 +326,12 @@ class Catalog:
         if old_bytes + len(raster.raw) > SCAN_BYTES_PER_REEL:
             raise Limit("每卷的源扫描总量最多为 480 MiB。")
         scan_id = key()
-        connection.execute(f"INSERT INTO scans({SCAN_FIELDS},raw) VALUES(?,?,?,?,?,?,?,?)",
-                           (scan_id, reel, title, note, serialize(raster.metadata()), raster.digest, utc_text(), raster.raw))
-        event(connection, reel, scan_id, scan_id, "scan.imported", {"title": title, "sha256": raster.digest})
+        connection.execute(f"INSERT INTO scans({SCAN_FIELDS},raw) VALUES(?,?,?,?,?,?,?,?,?)",
+                           (scan_id, reel, title, note, serialize(raster.metadata()), raster.digest,
+                            origin_kind, utc_text(), raster.raw))
+        event(connection, reel, scan_id, scan_id,
+              "scan.imported" if origin_kind == "imported" else "scan.derived",
+              {"title": title, "sha256": raster.digest, "origin": origin_kind})
         self._save_recipe(connection, scan_id, recipe, "入库设置", "intake", 0)
         return scan_id, True
 
@@ -532,6 +560,45 @@ class Catalog:
                                 sha256(archive).hexdigest(), utc_text(), archive))
             event(connection, reel_id, None, packet, "packet.retained", {"title": title, "asset_count": summary["asset_count"]})
             return self._get_packet(connection, packet)
+
+    def save_join(self, reel_id, *, raster, title, note, recipe, head_id, tail_id, manifest):
+        join_id = key()
+        with self.database(write=True) as connection:
+            self._summary_reel(connection, identifier(reel_id))
+            head = self._get_scan(connection, head_id)
+            tail = self._get_scan(connection, tail_id)
+            if head["reel_id"] != reel_id or tail["reel_id"] != reel_id:
+                raise Conflict("接续的两张扫描须属于同一个档案卷。")
+            bounded_count(connection, "joins", "reel_id", reel_id, JOIN_LIMIT, f"每卷最多保留 {JOIN_LIMIT} 次接续。")
+            output_id, created = self._insert_scan(connection, reel_id, raster=raster, title=title, note=note,
+                                                   recipe=recipe, origin_kind="derived_join")
+            if not created:
+                raise Conflict("接续结果与卷内已有图像字节相同，已保留原条目，未重复保存。")
+            connection.execute(f"INSERT INTO joins({JOIN_FIELDS}) VALUES(?,?,?,?,?,?,?,?)",
+                               (join_id, reel_id, output_id, head_id, tail_id, title, serialize(manifest), utc_text()))
+            event(connection, reel_id, output_id, join_id, "join.retained",
+                  {"title": title, "head": head_id, "tail": tail_id, "segments": len(manifest["segments"])})
+            return self._get_join(connection, join_id)
+
+    def _get_join(self, connection, join_id):
+        row = one(connection, f"SELECT {JOIN_FIELDS} FROM joins WHERE id=?", (identifier(join_id),), "接续记录")
+        return deserialize(row, ("manifest",))
+
+    def get_join(self, join_id):
+        with self.database() as connection:
+            return self._get_join(connection, join_id)
+
+    def join_for_scan(self, scan_id):
+        with self.database() as connection:
+            self._get_scan(connection, scan_id)
+            row = connection.execute("SELECT id FROM joins WHERE output_scan_id=?", (identifier(scan_id),)).fetchone()
+            return self._get_join(connection, row["id"]) if row else None
+
+    def list_joins(self, reel_id):
+        with self.database() as connection:
+            self._summary_reel(connection, identifier(reel_id))
+            rows = connection.execute(f"SELECT {JOIN_FIELDS} FROM joins WHERE reel_id=? ORDER BY created,id", (reel_id,))
+            return [deserialize(row, ("manifest",)) for row in rows]
 
     def audit(self, reel_id, before=None, limit=30):
         query = "SELECT id,reel_id,scan_id,subject_id,kind,detail,time FROM events WHERE reel_id=?"

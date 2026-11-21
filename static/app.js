@@ -2,6 +2,7 @@ import {$, all, action, boxInputs, check, checked, closeModal, dt, esc, field, f
 import {blank, connectFilm, currentBox, filmPage, filmSpan, library, refreshFilmOverlay, techSummary} from './film.js';
 import {auditStubHistory, extractMonitor, extractRows, instrumentResult, readingDetails, recipeFrom, rowsFields, settingsPanel, soundResult, TABS, TOOL, toolPayload, waveCanvas} from './panels.js';
 import {cueForm, deskPage, packetReady, zipSummary} from './desk.js';
+import {commitJoin, joinWizard, openJoinWizard, runCandidateSearch, runPlanPreview} from './join.js';
 
 const state = {
     library:{reels:[]}, reel:null, scan:null, takes:[], proofs:[], workspace:'scan', panel:'recipe', tool:'exposure',
@@ -314,6 +315,32 @@ const commands = {
         modal('保存巡检证据',form('proof-form',field('title','证据名称',TOOL[tool],{full:true,maxlength:90})+textarea('note','备注','',650),submit('保存图像证据')));
     },
     'contact':openContact,
+    'open-join':()=>openJoinWizard(state),
+    'join-back':()=>modal('两段扫描纵向接续', `<p class="panel-note">调整两张图上的大概重叠段后重新查找候选。</p><div id="join-step">${joinWizard(state)}</div>`),
+    'join-back-candidates':async ()=>{
+        const result = state.joinWizard.candidates;
+        const options = result.candidates.map((candidate,index)=>`<label class="check full join-candidate"><input type="radio" name="offset" value="${candidate.offset}" ${candidate.offset===state.joinWizard.chosenOffset?'checked':''}>
+            <span><b>候选 ${index+1} · 偏移 ${candidate.offset>=0?'+':''}${candidate.offset} 行</b><small>相关 ${candidate.score.toFixed(4)} · 共同行 ${candidate.overlap_rows}</small></span></label>`).join('');
+        modal('选择对齐候选',form('join-candidate-form',`<div class="join-candidates">${options}</div><div class="form-footer">${submit('生成接续方案预览')}</div>`));
+    },
+    'join-open-output':data=>closeModal() || openScan(data.id,null,{workspace:true}),
+    'join-view-manifest':async data=>{
+        const record = await request(`/api/reels/${state.reel.reel.id}/joins`).then(doc=>doc.joins.find(item=>item.id===data.id));
+        modal('接续来源明细', jsonDetails(record.manifest, '完整接续清单（含每段原扫描与原片行）'));
+    },
+    'join-use-selection-head':()=>fillJoinMarkFromSelection(state,'head'),
+    'join-use-selection-tail':()=>fillJoinMarkFromSelection(state,'tail'),
+    'open-join-record':async ()=>{
+        const record = await request(scanURL(state.scan.scan.id,'/join'));
+        const manifest = record.join.manifest;
+        const rows = manifest.segments.map(segment=>{
+            const scan = segment.source === 'head' ? manifest.head_title : manifest.tail_title;
+            return `<tr><td>${segment.source === 'head' ? '片头' : '片尾'}</td><td>${span([segment.output_start,segment.output_stop])}</td><td>${esc(scan)}</td><td>${span([segment.source_first_row,segment.source_after_last_row])}</td><td>${segment.rows}</td><td>${esc(segment.reason)}</td></tr>`;
+        }).join('');
+        modal('接续来源明细',metrics([['对齐偏移',`${manifest.offset_rows>=0?'+':''}${manifest.offset_rows} 行`],['重叠行',manifest.overlap.rows],['来源段数',manifest.segments.length],['切缝过渡',`${manifest.crossfade_rows} 行`]])+
+            `<div class="table-wrap"><table class="table"><thead><tr><th>来源</th><th>成片行</th><th>原扫描</th><th>原片行</th><th>行数</th><th>选由</th></tr></thead><tbody>${rows}</tbody></table></div>`+
+            jsonDetails(manifest,'完整接续清单'));
+    },
     'open-ab':()=>{
         const takes=state.takes.map(take=>[take.id,take.title]);
         modal('A/B 监听核对',form('ab-form',select('a','监听 A（左）',takes,takes[0][0])+select('b','监听 B（右）',takes,takes[1][0])+
@@ -345,6 +372,24 @@ function shiftItem(at, by) {
     const [entry] = state.desk.items.splice(at,1);
     state.desk.items.splice(target,0,entry);
     rerenderPlaylist();
+}
+
+function fillJoinMarkFromSelection(state, side) {
+    const formNode = $('#join-form');
+    if (!formNode) return;
+    const chosenScan = formNode.elements.namedItem(side === 'head' ? 'head_scan' : 'tail_scan').value;
+    if (state.scan?.scan.id !== chosenScan) {
+        notice(`请先在左栏打开${side === 'head' ? '片头' : '片尾'}扫描并框选重叠段。`, true);
+        return;
+    }
+    if (!state.frame.selection) {
+        notice('先在该扫描上拖动框选大概的重叠行段。', true);
+        return;
+    }
+    const box = state.frame.selection;
+    formNode.elements.namedItem(`${side}_row0`).value = box[1];
+    formNode.elements.namedItem(`${side}_row1`).value = box[3];
+    notice(`已填入${side === 'head' ? '片头' : '片尾'}重叠行 ${box[1]}–${box[3]}。`);
 }
 
 const submitters = {
@@ -424,6 +469,9 @@ const submitters = {
         await loadDesk();modal(result.packet.title,packetReady(result.packet));notice('档案交付包已保存。');
     },
     'verify-form':async node=>modal('交付 ZIP 校验结果',zipSummary(await post('/api/packets/verify',new FormData(node)))),
+    'join-form':async node=>runCandidateSearch(state,node),
+    'join-candidate-form':async node=>runPlanPreview(state,node),
+    'join-confirm-form':async node=>commitJoin(state,node),
 };
 
 async function handle(work, target) {

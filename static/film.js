@@ -22,7 +22,7 @@ export function library(state) {
     const reel = state.reel?.reel;
     const here = state.scan?.scan?.id;
     const choices = state.library.reels.map(item => `<button type="button" class="lib-entry" data-action="reel" data-id="${item.id}" aria-current="${item.id === reel?.id}"><span>${item.synthetic ? '<span class="type-dot" aria-label="合成素材">●</span> ' : ''}${esc(item.title)}</span><small class="lib-meta">${esc(item.gauge)} · ${fmt(item.scan_count,0)} 张扫描</small></button>`).join('');
-    const scans = (state.reel?.scans || []).map((item,n) => `<button type="button" class="lib-entry" data-action="scan" data-id="${item.id}" aria-current="${item.id === here}"><span><span class="scan-index">${String(n+1).padStart(2,'0')}</span>${esc(item.title)}</span><small class="lib-meta">${fmt(item.metadata.height,0)} 行 · ${item.metadata.bit_depth} bit</small></button>`).join('');
+    const scans = (state.reel?.scans || []).map((item,n) => `<button type="button" class="lib-entry" data-action="scan" data-id="${item.id}" aria-current="${item.id === here}"><span><span class="scan-index">${String(n+1).padStart(2,'0')}</span>${item.origin_kind === 'derived_join' ? '<span class="type-dot" title="接续生成">⛓ </span>' : ''}${esc(item.title)}</span><small class="lib-meta">${fmt(item.metadata.height,0)} 行 · ${item.metadata.bit_depth} bit${item.origin_kind === 'derived_join' ? ' · 接续' : ''}</small></button>`).join('');
     return `<h2>档案库</h2><div class="library-list">${choices || '<p class="lib-empty">暂无档案卷</p>'}</div>${reel ? `<h3>原始扫描</h3><div class="library-list">${scans || '<p class="lib-empty">本卷还未导入图像</p>'}</div>${action('intake','导入图像',{},'subtle lib-action')}${action('batch-intake','批量导入 ZIP',{},'quiet lib-action')}` : ''}`;
 }
 
@@ -52,10 +52,12 @@ export function filmPage(state) {
     const view = state.scan.recipe;
     const caption = `${scan.metadata.width} 列 × ${fmt(scan.metadata.height,0)} 行`;
     const tools = [action('technical','技术资料'),link(scanURL(scan.id,'/original'),'下载原始扫描'),action('toggle-tonal',state.frame.tonal === 'native' ? '拉伸显示' : '原始亮度')].join('');
-    const nav = `${action('window-form','定位行窗')}${action('clear-selection','清除框选')}${action('save-marker','保存定位框')}${action('contact','制作联排')}`;
+    const nav = `${action('window-form','定位行窗')}${action('clear-selection','清除框选')}${action('save-marker','保存定位框')}${action('contact','制作联排')}${action('open-join','接续重叠段')}`;
     const missingPane = state.scan.is_latest ? '' : `<p class="panel-note status-warning">当前正在打开读片历史 v${view.seq}，最新配方为 v${state.scan.latest}。</p>`;
+    const derivedPane = state.scan.scan.origin_kind === 'derived_join'
+        ? `<p class="panel-note status-good">这是由两张扫描接续生成的连续边带。${action('open-join-record','查看接续来源明细',{},'subtle')}</p>` : '';
     const output = state.result || {html:''};
-    return `<header class="scene-header"><div><h1>${esc(scan.title)}</h1><div class="scene-sub"><span>${esc(state.reel.reel.gauge)}</span><span>${esc(caption)}</span><span>${scan.metadata.bit_depth} 位</span><span>配方 v${view.seq}</span></div></div><div class="scene-actions">${tools}</div></header>${missingPane}${terrain(state)}<div class="selection-tools">${nav}</div><section id="result-slot" aria-label="工具结果">${output.html}</section>`;
+    return `<header class="scene-header"><div><h1>${esc(scan.title)}</h1><div class="scene-sub"><span>${esc(state.reel.reel.gauge)}</span><span>${esc(caption)}</span><span>${scan.metadata.bit_depth} 位</span><span>配方 v${view.seq}</span>${state.scan.scan.origin_kind === 'derived_join' ? '<span>接续生成</span>' : ''}</div></div><div class="scene-actions">${tools}</div></header>${missingPane}${derivedPane}${terrain(state)}<div class="selection-tools">${nav}</div><section id="result-slot" aria-label="工具结果">${output.html}</section>`;
 }
 
 function pos(state, native) {

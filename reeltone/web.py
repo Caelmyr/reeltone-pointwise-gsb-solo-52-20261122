@@ -18,6 +18,7 @@ from .demo import seed_library
 from .errors import Absent, BenchError, Limit
 from .instruments import TOOLS, run_tool
 from .intake_batch import BATCH_BYTES, inspect_upload
+from .join import confirm_join, find_candidates, preview_plan
 from .listen_pair import retained_pair
 from .packet import MAX_PACKET_BYTES, json_bytes, verify_packet
 from .raster import FILE_BYTES, MAX_HEIGHT, MAX_PIXELS, MAX_WIDTH, query_box, read_scan
@@ -159,6 +160,38 @@ def library_routes(app, catalog, gate):
             if item.get("preview") is not None:
                 item["preview"] = encode_data(item["preview"], "image/png")
         return jsonify(result), 201 if result.get("added_count") else 200
+
+    @app.post("/api/reels/<reel_id>/joins/candidates")
+    def join_candidates(reel_id):
+        reel = catalog.get_reel(reel_id)
+        with gate.work():
+            return jsonify(find_candidates(catalog, reel["id"], json_body()))
+
+    @app.post("/api/reels/<reel_id>/joins/preview")
+    def join_preview(reel_id):
+        reel = catalog.get_reel(reel_id)
+        with gate.work():
+            report, plate = preview_plan(catalog, reel["id"], json_body())
+        return jsonify({**report, "preview": encode_data(plate, "image/png")})
+
+    @app.post("/api/reels/<reel_id>/joins")
+    def join_commit(reel_id):
+        reel = catalog.get_reel(reel_id)
+        with gate.work():
+            record, plate = confirm_join(catalog, reel["id"], json_body())
+        return jsonify(join=record, preview=encode_data(plate, "image/png")), 201
+
+    @app.get("/api/reels/<reel_id>/joins")
+    def join_list(reel_id):
+        reel = catalog.get_reel(reel_id)
+        return jsonify(joins=catalog.list_joins(reel["id"]))
+
+    @app.get("/api/scans/<scan_id>/join")
+    def join_record(scan_id):
+        record = catalog.join_for_scan(scan_id)
+        if record is None:
+            raise Absent("该扫描不是接续生成的边带。")
+        return jsonify(join=record)
 
 
 def source_routes(app, catalog, gate):
