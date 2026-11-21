@@ -15,6 +15,7 @@ SCAN_LIMIT = 48
 SCAN_BYTES_PER_REEL = 480 * 1024 * 1024
 TAKE_LIMIT = 120
 PROOF_LIMIT = 100
+FRAME_CHECK_LIMIT = 100
 CUE_LIMIT = 100
 RECIPE_HISTORY_LIMIT = 200
 PACKET_LIMIT = 30
@@ -96,6 +97,20 @@ CREATE TABLE IF NOT EXISTS cues (
     created TEXT NOT NULL,
     updated TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS frame_checks (
+    id TEXT PRIMARY KEY,
+    scan_id TEXT NOT NULL REFERENCES scans(id),
+    proof_id TEXT REFERENCES proofs(id),
+    title TEXT NOT NULL,
+    note TEXT NOT NULL,
+    reading TEXT NOT NULL,
+    returned_sha256 TEXT NOT NULL,
+    primary_file BLOB NOT NULL,
+    primary_sha256 TEXT NOT NULL,
+    secondary_file BLOB NOT NULL,
+    secondary_sha256 TEXT NOT NULL,
+    created TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS packets (
     id TEXT PRIMARY KEY,
     reel_id TEXT NOT NULL REFERENCES reels(id),
@@ -128,6 +143,7 @@ CREATE INDEX IF NOT EXISTS scans_by_reel ON scans(reel_id, created);
 CREATE INDEX IF NOT EXISTS recipes_by_scan ON recipes(scan_id, seq DESC);
 CREATE INDEX IF NOT EXISTS takes_by_scan ON takes(scan_id, created DESC);
 CREATE INDEX IF NOT EXISTS proofs_by_scan ON proofs(scan_id, created DESC);
+CREATE INDEX IF NOT EXISTS frame_checks_by_scan ON frame_checks(scan_id, created DESC);
 CREATE INDEX IF NOT EXISTS cues_by_reel ON cues(reel_id, scan_id, y0, y1);
 CREATE INDEX IF NOT EXISTS packets_by_reel ON packets(reel_id, created DESC);
 CREATE INDEX IF NOT EXISTS markers_by_scan ON markers(scan_id, created DESC);
@@ -139,6 +155,8 @@ SCAN_FIELDS = "id,reel_id,title,source_note,metadata,sha256,created"
 RECIPE_FIELDS = "id,scan_id,seq,settings,fingerprint,label,theme,created"
 TAKE_FIELDS = "id,scan_id,recipe_id,title,settings,payload,status,wav_sha256,created,updated"
 PROOF_FIELDS = "id,scan_id,recipe_id,title,category,note,evidence,primary_sha256,secondary_sha256,created"
+FRAME_CHECK_FIELDS = ("id,scan_id,proof_id,title,note,reading,returned_sha256,primary_sha256,"
+                      "secondary_sha256,created")
 CUE_FIELDS = "id,reel_id,scan_id,title,kind,status,y0,y1,anchor,note,created,updated"
 PACKET_FIELDS = "id,reel_id,title,filename,summary,sha256,created"
 MARKER_FIELDS = "id,scan_id,title,kind,display,notes,created"
@@ -423,6 +441,45 @@ class Catalog:
             self._get_scan(connection, scan_id)
             rows = connection.execute(f"SELECT {PROOF_FIELDS} FROM proofs WHERE scan_id=? ORDER BY created DESC,id", (scan_id,))
             return [deserialize(row, ("evidence",)) for row in rows]
+
+    @staticmethod
+    def _get_frame_check(connection, check_id, raw=False):
+        extras = ",primary_file,secondary_file" if raw else ""
+        row = one(connection, f"SELECT {FRAME_CHECK_FIELDS}{extras} FROM frame_checks WHERE id=?",
+                  (identifier(check_id),), "原片框核对")
+        return deserialize(row, ("reading",))
+
+    def get_frame_check(self, check_id, *, raw=False):
+        with self.database() as connection:
+            return self._get_frame_check(connection, check_id, raw)
+
+    def list_frame_checks(self, scan_id):
+        with self.database() as connection:
+            self._get_scan(connection, scan_id)
+            rows = connection.execute(f"SELECT {FRAME_CHECK_FIELDS} FROM frame_checks WHERE scan_id=? "
+                                      "ORDER BY created DESC,id", (scan_id,))
+            return [deserialize(row, ("reading",)) for row in rows]
+
+    def save_frame_check(self, scan_id, proof_id, title, note, reading, plate, heat_map, returned_digest):
+        check_id = key()
+        with self.database(write=True) as connection:
+            scan = self._get_scan(connection, scan_id)
+            if proof_id is not None:
+                proof = connection.execute("SELECT id FROM proofs WHERE id=? AND scan_id=?",
+                                           (identifier(proof_id), scan_id)).fetchone()
+                if proof is None:
+                    raise Conflict("原片裁片证据不属于该扫描。")
+            bounded_count(connection, "frame_checks", "scan_id", scan_id, FRAME_CHECK_LIMIT,
+                          f"每份扫描最多保留 {FRAME_CHECK_LIMIT} 次原片框核对。")
+            connection.execute(f"""INSERT INTO frame_checks({FRAME_CHECK_FIELDS},primary_file,secondary_file)
+                                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               (check_id, scan_id, proof_id, title, note, serialize(reading), returned_digest,
+                                sha256(plate).hexdigest(), sha256(heat_map).hexdigest(), utc_text(),
+                                plate, heat_map))
+            event(connection, scan["reel_id"], scan_id, check_id, "frame_check.retained",
+                  {"title": title, "verdict": reading["verdict"],
+                   "orientation": reading.get("matched_orientation")})
+            return self._get_frame_check(connection, check_id)
 
     def save_proof(self, scan_id, recipe_id, title, category, note, evidence, first, second=None):
         option(category, PROOF_CATEGORIES, "证据分类")

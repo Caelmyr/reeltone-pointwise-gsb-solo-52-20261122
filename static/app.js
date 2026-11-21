@@ -1,12 +1,12 @@
 import {$, all, action, boxInputs, check, checked, closeModal, dt, esc, field, fmt, form, image, jsonDetails, link, listTable, metrics, modal, notice, number, post, readBox, record, reelURL, request, scanURL, select, shorten, span, submit, textarea, value} from './ui.js';
 import {blank, connectFilm, currentBox, filmPage, filmSpan, library, refreshFilmOverlay, techSummary} from './film.js';
-import {auditStubHistory, extractMonitor, extractRows, instrumentResult, readingDetails, recipeFrom, rowsFields, settingsPanel, soundResult, TABS, TOOL, toolPayload, waveCanvas} from './panels.js';
+import {auditStubHistory, extractMonitor, extractRows, frameCheckResult, instrumentResult, readingDetails, recipeFrom, retainedFrameCheck, rowsFields, settingsPanel, soundResult, TABS, TOOL, toolPayload, waveCanvas} from './panels.js';
 import {cueForm, deskPage, packetReady, zipSummary} from './desk.js';
 
 const state = {
-    library:{reels:[]}, reel:null, scan:null, takes:[], proofs:[], workspace:'scan', panel:'recipe', tool:'exposure',
+    library:{reels:[]}, reel:null, scan:null, takes:[], proofs:[], frameChecks:[], workspace:'scan', panel:'recipe', tool:'exposure',
     frame:{start:0,rows:480,tonal:'native',point:null,selection:null}, monitor:{}, listenRows:null, result:null,
-    instrumentContext:null, pairScan:null, desk:null, modalData:null, scanTicket:0,
+    instrumentContext:null, pairScan:null, frameProof:null, frameContext:null, desk:null, modalData:null, scanTicket:0,
 };
 
 function drawLibrary() { $('#library').innerHTML = library(state); }
@@ -77,13 +77,15 @@ async function openReel(id) {
 async function openScan(id, recipe = null, {keepPosition = false, workspace = false} = {}) {
     const ticket = ++state.scanTicket;
     const extra = recipe ? `?recipe=${recipe}` : '';
-    const [source, takes, proofs] = await Promise.all([
+    const [source, takes, proofs, frameChecks] = await Promise.all([
         request(scanURL(id,extra)),request(scanURL(id,'/takes')),request(scanURL(id,'/proofs')),
+        request(scanURL(id,'/frame-checks')),
     ]);
     if (ticket!==state.scanTicket) return;
     state.scan = source;
     state.takes = takes.takes;
     state.proofs = proofs.proofs;
+    state.frameChecks = frameChecks.checks;
     if (workspace) state.workspace='scan';
     if (!keepPosition) {
         state.frame.start = 0;
@@ -93,6 +95,8 @@ async function openScan(id, recipe = null, {keepPosition = false, workspace = fa
         state.result = null;
         state.instrumentContext = null;
         state.pairScan = null;
+        state.frameProof = null;
+        state.frameContext = null;
     }
     draw();
 }
@@ -244,6 +248,47 @@ function jumpCue(id, edit) {
     });
 }
 
+function frameReferenceFields(node) {
+    const proofId = node.elements.namedItem('frame_proof')?.value || '';
+    if (proofId) return {proof_id: proofId};
+    return {box: readBox(node, 'box')};
+}
+
+function openFrameCheckModal(node) {
+    const reference = frameReferenceFields(node);
+    state.frameProof = reference.proof_id || null;
+    const fields = field('returned','同事回传的同尺寸图','',{type:'file',accept:'image/png,image/tiff,image/jpeg,.tif,.tiff',full:true})+
+        field('check_title','核对名称',state.frameProof ? '回传裁片核对' : '原片框核对',{full:true,maxlength:90})+
+        textarea('check_note','备注（保存时随结果留存）','',650);
+    state.modalData = {reference, scan:state.scan.scan.id, recipe:state.scan.recipe.id};
+    modal('上传回传图核对原片框',
+        `<p class="panel-note">接受 PNG、单页 TIFF 或 JPEG，尺寸须与原片裁片一致（整体转 90° 也可）。系统自动尝试八个转向；馆里的原扫描和已留存裁片均不会被修改。</p>
+         ${form('frame-check-form',fields,submit('开始核对'))}<div id="frame-check-result"></div>`);
+}
+
+async function submitFrameCheck(node, retain) {
+    const draft = state.modalData;
+    const fileNode = node.elements.namedItem('returned');
+    if (!fileNode.files.length) throw Error('请先选择同事回传的图像。');
+    const form = new FormData();
+    form.append('returned', fileNode.files[0]);
+    form.append('recipe', draft.recipe);
+    if (draft.reference.proof_id) form.append('proof_id', draft.reference.proof_id);
+    else draft.reference.box.forEach((value, index) => form.append(`box${index}`, value));
+    form.append('title', value(node, 'check_title'));
+    form.append('note', value(node, 'check_note'));
+    const url = scanURL(draft.scan, retain ? '/frame-check/retain' : '/frame-check');
+    const answer = await post(url, form);
+    state.frameContext = {reference: draft.reference, recipe: draft.recipe, reading: retain ? answer.reading : answer};
+    $('#frame-check-result').innerHTML = frameCheckResult(retain ? answer.reading : answer);
+    if (retain) {
+        state.frameChecks = (await request(scanURL(draft.scan,'/frame-checks'))).checks;
+        drawSettings();
+        notice('核对结果已留在该证据旁，馆里原文件未改动。');
+    }
+    return answer;
+}
+
 const commands = {
     'load-demo':async () => {
         const response=await post('/api/training');
@@ -370,6 +415,7 @@ const submitters = {
     'tool-form':async node=>{
         const scan=state.scan.scan.id;
         const kind=state.tool;
+        if (kind === 'framecheck') { openFrameCheckModal(node); return; }
         const payload=toolPayload(state,node);
         const response=await post(scanURL(scan,`/instrument/${kind}`),payload);
         if (state.scan.scan.id!==scan) return;
@@ -424,6 +470,16 @@ const submitters = {
         await loadDesk();modal(result.packet.title,packetReady(result.packet));notice('档案交付包已保存。');
     },
     'verify-form':async node=>modal('交付 ZIP 校验结果',zipSummary(await post('/api/packets/verify',new FormData(node)))),
+    'frame-check-form':async node=>{ await submitFrameCheck(node, false); },
+    'retain-frame-check':async ()=>{
+        const node = $('#frame-check-form');
+        if (!node) return;
+        await submitFrameCheck(node, true);
+    },
+    'open-frame-check':async data=>{
+        const view = await request(`/api/frame-checks/${data.id}`);
+        modal(view.check.title, retainedFrameCheck(view));
+    },
 };
 
 async function handle(work, target) {
@@ -455,6 +511,7 @@ document.addEventListener('change',event=>{
     const form=node.form;
     if(form?.id==='tool-form' && node.name==='tool') {state.tool=node.value;drawSettings();}
     if(form?.id==='tool-form' && node.name==='other_scan') {state.pairScan=node.value;drawSettings();}
+    if(form?.id==='tool-form' && node.name==='frame_proof') {state.frameProof=node.value || null;drawSettings();}
     if(form?.id==='batch-form' && node.name==='batch') {state.modalData.digest=null;$('#intake-result').replaceChildren();}
     if(form?.id==='packet-form') {updatePacketForm();if(node.name==='playtake') rerenderPlaylist();}
 });

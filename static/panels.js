@@ -5,6 +5,7 @@ export const TOOL = {
     exposure:'曝光直方图', crop:'保留原像素证据', contour:'透光轮廓曲线', scope:'监听频谱', perforations:'齿孔间距',
     references:'明暗参照取样', locate:'查找光学读窗', blemish:'局部瑕疵候选', compare:'两张扫描对照',
     sample:'原像素探针', wedge:'阶梯透射标定', splices:'横向接片候选', slit:'读窗截面漂移', pilot:'基准音稳定度',
+    framecheck:'原片框证据核对',
 };
 export const TABS = {recipe:'配方', read:'监听', tools:'巡检', retained:'记录'};
 const SIGNAL = [['width','透光宽度'],['light','平均扫描亮度']];
@@ -78,6 +79,14 @@ function toolControls(state) {
     const rows = picked ? [picked[1],picked[3]] : prominentRows.includes(t) ? [0,h] : [box[1],box[3]];
     const smallFields = (items) => items.map(([name,caption,val,min,max,step])=>field(name,caption,val,{type:'number',min,max,step,required:true})).join('');
     const mainBox = boxInputs('box',box,'当前扫描上的原片范围');
+    if (t === 'framecheck') {
+        const cropProofs = state.proofs.filter(proof => proof.category === 'image'
+            && proof.evidence?.comparison_preserves_native_pixels);
+        const proofOptions = [['',`按当前选框（${box[2]-box[0]} × ${box[3]-box[1]} 原生像素）`],
+            ...cropProofs.map(proof => [proof.id,`裁片证据 · ${proof.title}（${proof.evidence.box.join(' · ')}）`])];
+        return select('frame_proof','核对基准',proofOptions,state.frameProof || '',true)+ mainBox +
+            `<p class="panel-note full">打开后上传同事回传的同尺寸图（PNG／单页 TIFF／JPEG）。系统会尝试八个转向，判定像素完全一致、仅位深转换、可指认差异或看不准。馆里原文件不会被改动。</p>`;
+    }
     if (t === 'sample') {
         const [x,y] = currentPoint(state);
         return smallFields([['x','原片列',x,0,meta.width-1,1],['y','原片行',y,0,h-1,1],['radius','可见半径',5,2,16,1]]);
@@ -147,8 +156,12 @@ function retention(state) {
     const takes = state.takes.map(take=>record(take.title,`${TAKE[take.status]} · v${take.payload.parent.recipe_number} · ${fmt(take.payload.audio.duration_seconds)} s`,
         `${action('open-take','打开',{id:take.id})}${link(`/api/takes/${take.id}/wav?download=1`,'WAV')}`)).join('');
     const proofs = state.proofs.map(proof=>record(proof.title,`${proof.category} · ${dt(proof.created)}`,action('open-proof','打开',{id:proof.id}))).join('');
+    const frameChecks = (state.frameChecks || []).map(check=>{
+        const verdict = FRAME_VERDICT[check.reading.verdict]?.[0] || check.reading.verdict;
+        return record(check.title,`${verdict} · ${dt(check.created)}`,action('open-frame-check','打开',{id:check.id}));
+    }).join('');
     const markers = state.scan.markers.map(marker=>record(marker.title,`原片 ${marker.display.box.join(' · ')}`,action('open-marker','定位',{id:marker.id}))).join('');
-    return `<section class="panel"><div class="panel-title"><h2>监听快照</h2>${state.takes.length > 1 ? action('open-ab','A/B 对听',{},'subtle') : ''}</div><div class="data-list">${takes || '<p class="panel-note">还未保存监听。</p>'}</div></section><section class="panel"><h2>图像证据</h2><div class="data-list">${proofs || '<p class="panel-note">还未保存图像证据。</p>'}</div></section><section class="panel"><h2>定位框</h2><div class="data-list">${markers || '<p class="panel-note">还未保存定位框。</p>'}</div></section>`;
+    return `<section class="panel"><div class="panel-title"><h2>监听快照</h2>${state.takes.length > 1 ? action('open-ab','A/B 对听',{},'subtle') : ''}</div><div class="data-list">${takes || '<p class="panel-note">还未保存监听。</p>'}</div></section><section class="panel"><h2>图像证据</h2><div class="data-list">${proofs || '<p class="panel-note">还未保存图像证据。</p>'}</div></section><section class="panel"><h2>原片框核对</h2><div class="data-list">${frameChecks || '<p class="panel-note">还没有回传图核对记录。</p>'}</div></section><section class="panel"><h2>定位框</h2><div class="data-list">${markers || '<p class="panel-note">还未保存定位框。</p>'}</div></section>`;
 }
 
 export function settingsPanel(state) {
@@ -182,6 +195,58 @@ function readingValue(tool, data) {
         case 'pilot': return [['支持的窗口',`${data.trusted} / ${data.windows}`],['中位频率',`${fmt(data.measured_hz_q10_q50_q90?.[1],3)} Hz`],['频率偏差',`${fmt(data.frequency_drift_ppm,1)} ppm`]];
         default: return [];
     }
+}
+
+export const FRAME_VERDICT = {
+    identical:['像素完全一致','status-good'], depth_only:['与正常位深转换相符','status-good'],
+    different:['存在可以指认的差异','status-error'], inconclusive:['看不准，分开处理','status-warning'],
+};
+const ORIENTATION_TEXT = {
+    native:'原方向（无需转向）', mirror_x:'左右镜像', reverse_y:'上下翻转', 'rotate_180':'旋转 180°',
+    transpose:'主对角线转置', rotate_90_cw:'顺时针旋转 90°', rotate_90_ccw:'逆时针旋转 90°', transverse:'副对角线转置',
+};
+
+export function frameCheckResult(data) {
+    const [verdictText, status] = FRAME_VERDICT[data.verdict] || [data.verdict,''];
+    const stats = data.alignment_statistics || {};
+    const returned = data.returned_image || {};
+    const metricsRows = [
+        ['核对结论',verdictText],
+        ['对应方向',data.matched_orientation_label || '未能对正'],
+        ['回传编码',`${returned.format || '—'} · ${returned.bit_depth ?? '—'} bit`],
+        ['回传尺寸',returned.width ? `${returned.width} × ${returned.height}` : '—'],
+        ['差值 RMSE',fmt(stats.rmse,5)],
+        ['最大像素差',fmt(stats.max_absolute,5)],
+    ];
+    const candidates = (data.orientation_candidates || []).slice(0, 8).map((row, n) =>
+        record(`${n+1}. ${ORIENTATION_TEXT[row.key] || row.label}`,`RMSE ${fmt(row.rmse,5)} · 平均绝对差 ${fmt(row.mean_absolute,5)}`)).join('');
+    const regions = (data.difference_regions_native || []).map((region, n) =>
+        record(`差异 ${n+1} · 原片框 [${region.native_box.join(' · ')}]`,
+            `最差点 (${region.native_worst_point.join(' · ')}) · 最大差 ${fmt(region.max_absolute_delta,4)} · 约 ${region.pixel_count_estimate} 像素`)).join('');
+    return `<article class="box"><h2>原片框证据核对</h2>
+        <p class="panel-note ${status}"><strong>${esc(verdictText)}</strong>${data.matched_orientation ? ` · 对应方向：${esc(data.matched_orientation_label)}` : ''}</p>
+        ${metrics(metricsRows)}
+        <p class="panel-note">${esc(data.interpretation || '')}</p>
+        ${regions ? `<h3>可指认差异（未翻转原片坐标）</h3><div class="data-list">${regions}</div>` : ''}
+        <div class="inspect-media">${image(data.preview,'原片框核对图版')}${image(data.heat_map,'差值热图')}</div>
+        <h3>八种转向的对齐误差（取最优）</h3><div class="data-list">${candidates}</div>
+        <div class="form-footer">${action('retain-frame-check','把本次结果留在证据旁',{},'strong')}</div>
+        ${jsonDetails(data,'查看核对读数明细')}</article>`;
+}
+
+export function retainedFrameCheck(view) {
+    const {check, verified, integrity} = view;
+    const reading = check.reading;
+    const [verdictText, status] = FRAME_VERDICT[reading.verdict] || [reading.verdict,''];
+    const primary = `/api/frame-checks/${check.id}/primary.png`;
+    const secondary = `/api/frame-checks/${check.id}/secondary.png`;
+    const tools = [link(primary+'?download=1','下载核对图版 PNG'),
+        link(secondary+'?download=1','下载差值热图 PNG'),
+        action('take-to-source','定位来源',{id:check.scan_id,row:reading.reference.native_box[1]})].join('');
+    return `<p class="panel-note ${status}"><strong>${esc(verdictText)}</strong> · ${esc(reading.matched_orientation_label || '未能对正')}</p>
+        <p class="panel-note ${verified?'status-good':'status-error'}">${verified?'引用基准、回传摘要与图版文件均通过校验。':'留存内容校验出现差异。'}</p>
+        <div class="inspect-media">${image(primary,'留存核对图版')}${image(secondary,'留存差值热图')}</div>
+        <div class="form-footer">${tools}</div>${jsonDetails(reading,'核对读数')}${jsonDetails(integrity,'校验核对')}`;
 }
 
 export function instrumentResult(data) {

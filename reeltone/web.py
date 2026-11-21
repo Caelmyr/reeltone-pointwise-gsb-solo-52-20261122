@@ -16,6 +16,9 @@ from .contact import make_contact
 from .cues import cue_coverage
 from .demo import seed_library
 from .errors import Absent, BenchError, Limit
+from .frame_review import (
+    current_frame_check_properties, retain_check, run_uploaded_check,
+)
 from .instruments import TOOLS, run_tool
 from .intake_batch import BATCH_BYTES, inspect_upload
 from .listen_pair import retained_pair
@@ -317,6 +320,49 @@ def analysis_routes(app, catalog, gate):
             raise Absent("配套证据图")
         return send_content(body, "image/png", f"{shipment_stem(proof['title'])}-{part}.png",
                             attach=request.args.get("download") == "1", etag=proof[f"{part}_sha256"])
+
+    @app.post("/api/scans/<scan_id>/frame-check")
+    def frame_check_upload(scan_id):
+        data = request.form.to_dict()
+        content, name = read_upload("returned", FILE_BYTES)
+        with gate.work():
+            material = load_material(catalog, scan_id, data.get("recipe") or None)
+            result = run_uploaded_check(catalog, material, data, content, name)
+        payload = result.reading()
+        payload["preview"] = encode_data(result.primary_png, "image/png")
+        payload["heat_map"] = encode_data(result.secondary_png, "image/png")
+        return jsonify(payload), 200
+
+    @app.post("/api/scans/<scan_id>/frame-check/retain")
+    def frame_check_retain(scan_id):
+        data = request.form.to_dict()
+        content, name = read_upload("returned", FILE_BYTES)
+        with gate.work():
+            material = load_material(catalog, scan_id, data.get("recipe") or None)
+            record, result = retain_check(catalog, material, data, content, name)
+        payload = {"check": record, "reading": result.reading(),
+                   "preview": encode_data(result.primary_png, "image/png"),
+                   "heat_map": encode_data(result.secondary_png, "image/png")}
+        return jsonify(payload), 201
+
+    @app.get("/api/scans/<scan_id>/frame-checks")
+    def frame_check_list(scan_id):
+        return jsonify(checks=catalog.list_frame_checks(scan_id))
+
+    @app.get("/api/frame-checks/<check_id>")
+    def frame_check_item(check_id):
+        with gate.work():
+            return jsonify(current_frame_check_properties(catalog, check_id))
+
+    @app.get("/api/frame-checks/<check_id>/<part>.png")
+    def frame_check_image(check_id, part):
+        if part not in ("primary", "secondary"):
+            raise Absent("该核对图")
+        check = catalog.get_frame_check(check_id, raw=True)
+        body = check[f"{part}_file"]
+        label = "plate" if part == "primary" else "heatmap"
+        return send_content(body, "image/png", f"{shipment_stem(check['title'])}-{label}.png",
+                            attach=request.args.get("download") == "1", etag=check[f"{part}_sha256"])
 
     @app.post("/api/scans/<scan_id>/ab")
     def ab_pair(scan_id):
