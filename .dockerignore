@@ -1,0 +1,5 @@
+.git
+.venv
+.reeltone-data
+**/__pycache__
+**/*.pyc

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>ReelTone · 光学声轨档案工作台</title>
+  <link rel="stylesheet" href="/ui/style.css">
+  <script type="module" src="/ui/app.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="/" aria-label="ReelTone 工作台首页"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><strong>ReelTone</strong></a>
+    <span class="brand-subtitle">光学声轨档案工作台</span>
+    <nav aria-label="工作区" class="global-tabs">
+      <button type="button" data-action="workspace" data-view="scan" aria-pressed="true">读片台</button>
+      <button type="button" data-action="workspace" data-view="desk" aria-pressed="false">审听与交付</button>
+    </nav>
+    <div class="mast-actions"><button type="button" class="subtle" data-action="load-demo">载入合成练习</button><button type="button" class="strong" data-action="new-reel">新建档案卷</button></div>
+  </header>
+  <main id="workbench" class="workbench">
+    <aside id="library" class="library" aria-label="档案卷与扫描"></aside>
+    <section id="workspace" class="workspace" aria-label="当前工作区"><div class="loading">正在载入档案卷…</div></section>
+    <aside id="settings" class="settings" aria-label="读片操作"></aside>
+  </main>
+  <section id="transport" class="transport" aria-label="监听结果" hidden></section>
+  <div id="note" class="notice" role="status" hidden></div>
+  <dialog id="modal" aria-labelledby="modal-heading"><div id="modal-content"></div></dialog>
+</body>
+</html>
