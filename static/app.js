@@ -2,12 +2,14 @@ import {$, all, action, boxInputs, check, checked, closeModal, dt, esc, field, f
 import {blank, connectFilm, currentBox, filmPage, filmSpan, library, refreshFilmOverlay, techSummary} from './film.js';
 import {auditStubHistory, extractMonitor, extractRows, instrumentResult, readingDetails, recipeFrom, rowsFields, settingsPanel, soundResult, TABS, TOOL, toolPayload, waveCanvas} from './panels.js';
 import {cueForm, deskPage, packetReady, zipSummary} from './desk.js';
+import {connectSynthesis, synthModal} from './synthesis.js';
 
 const state = {
     library:{reels:[]}, reel:null, scan:null, takes:[], proofs:[], workspace:'scan', panel:'recipe', tool:'exposure',
     frame:{start:0,rows:480,tonal:'native',point:null,selection:null}, monitor:{}, listenRows:null, result:null,
-    instrumentContext:null, pairScan:null, desk:null, modalData:null, scanTicket:0,
+    instrumentContext:null, pairScan:null, desk:null, modalData:null, scanTicket:0, synth:null, synthJob:null,
 };
+const synthesis = connectSynthesis(state);
 
 function drawLibrary() { $('#library').innerHTML = library(state); }
 function drawSettings() { $('#settings').innerHTML = settingsPanel(state); }
@@ -252,6 +254,16 @@ const commands = {
         await openReel(response.training[0].reel.id);
         notice(`已载入 ${response.scan_count} 张合成扫描。`);
     },
+    'open-synthesis':()=>synthModal(state),
+    'synth-commit':async data=>{
+        const answer=await synthesis.commit(data.job);
+        state.library=await request('/api/library');
+        closeModal();
+        await openReel(answer.reel_id);
+        const target=state.reel.scans.find(item=>item.id===answer.scan.id);
+        if (target) await openScan(target.id,null,{workspace:true});
+        notice('合成测试图已入库，已用正常读片台打开。可直接在「监听」里听回读。');
+    },
     'new-reel':makeReelModal,
     'reel':data=>openReel(data.id),
     'scan':data=>openScan(data.id,null,{workspace:true}),
@@ -348,6 +360,7 @@ function shiftItem(at, by) {
 }
 
 const submitters = {
+    'synth-form':async node=>synthesis.preview(node),
     'reel-form':async node=>{
         const response=await post('/api/reels',{title:value(node,'title'),accession:value(node,'accession'),gauge:value(node,'gauge'),note:value(node,'note')});
         state.library=await request('/api/library');closeModal();await openReel(response.reel.id);notice('档案卷已建立。');

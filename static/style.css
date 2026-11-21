@@ -206,3 +206,12 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   .playqueue { overflow-x: auto; }
   .playlist-item { min-width: 480px; }
 }
+
+/* Synthetic WAV -> optical test strip modal */
+dialog:has(#synth-result) { width: min(1120px, calc(100% - 26px)); }
+.synth-banner { margin: 10px 0; padding: 9px 12px; border: 1px solid var(--error, #b26967); border-radius: 7px; background: #3c282b; color: #f3d4d2; font-weight: 700; letter-spacing: .3px; }
+#synth-result h3 { margin: 16px 0 6px; font-size: 14px; color: var(--muted, #a5b3bc); }
+#synth-result .preview-grid { flex-direction: column; }
+#synth-result .preview-card { width: 100%; box-sizing: border-box; }
+#synth-result .preview-card img { width: 100%; max-height: none; }
+.synth-notes { margin: 6px 0; padding-left: 18px; color: #c9d5dc; font-size: 13px; line-height: 1.7; }

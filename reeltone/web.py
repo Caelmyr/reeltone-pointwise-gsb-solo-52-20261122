@@ -1,6 +1,7 @@
 from base64 import b64encode
 from contextlib import contextmanager
 from io import BytesIO
+import json
 import os
 from pathlib import Path
 from threading import BoundedSemaphore
@@ -26,11 +27,13 @@ from .replay import retained_replay
 from .review import build_packet, current_proof_properties, current_take_properties, restore_view, save_cue, save_marker
 from .source_info import inspect_source
 from .store import Catalog
+from .synthesizer import JobStore, MAX_WAV_BYTES, synthesize
 from .transfer_review import export_review, from_catalog
 from .visual import source_overview, source_tile
 
 
 STATIC = Path(__file__).resolve().parents[1] / "static"
+SYNTH_JOBS = JobStore()
 
 
 def json_body():
@@ -159,6 +162,76 @@ def library_routes(app, catalog, gate):
             if item.get("preview") is not None:
                 item["preview"] = encode_data(item["preview"], "image/png")
         return jsonify(result), 201 if result.get("added_count") else 200
+
+
+def synthesis_routes(app, catalog, gate):
+    @app.post("/api/synthesis/preview")
+    def synthesis_preview():
+        content, name = read_upload("wav", MAX_WAV_BYTES)
+        values = {}
+        raw = request.form.get("settings")
+        if raw:
+            try:
+                values = json.loads(raw)
+            except ValueError:
+                raise BenchError("合成设置不是有效的 JSON。") from None
+        with gate.work():
+            job = synthesize(content, name, values)
+            token = SYNTH_JOBS.put(job)
+            body = {"job": token, "synthetic": True, "report": job.report,
+                    "settings": job.settings.as_dict(),
+                    "figures": {key: encode_data(png, "image/png") for key, png in job.figures.items()}}
+        return jsonify(body), 200
+
+    @app.get("/api/synthesis/<token>/<kind>")
+    def synthesis_asset(token, kind):
+        if kind not in {"comparison.png", "spectrum.png", "strip.png"}:
+            raise Absent("该合成预览图")
+        job = SYNTH_JOBS.get(token)
+        png = job.figures[kind.split(".")[0]]
+        return send_content(png, "image/png", f"reeltone-synthetic-{kind}", etag=token)
+
+    @app.post("/api/synthesis/commit")
+    def synthesis_commit():
+        data = json_body()
+        token = text(data.get("job"), "合成预览编号", maximum=64)
+        job = SYNTH_JOBS.get(token)
+        with gate.work():
+            reel_values = {
+                "title": text(data.get("reel_title", f"合成测试卷 · {job.settings.title}"), "测试卷标题", maximum=120),
+                "accession": text(data.get("accession", f"RT-SYNTH-{token[:8].upper()}"), "入藏编号",
+                                  maximum=70, required=False),
+                "gauge": option(data.get("gauge", "Other"), ("16 mm", "35 mm", "Other"), "胶片规格"),
+                "note": text(data.get(
+                    "note",
+                    "由上传 WAV 生成的合成光学声轨测试图，仅用于读片参数比较，不是真实胶片扫描。"),
+                    "档案备注", maximum=800, required=False, multiline=True),
+                "demo_key": None,
+            }
+            note = ("测试用合成图（非真实扫描）。"
+                    f"来源 WAV：{job.sidecar['source_wav']['filename']}；"
+                    f"行速 {job.settings.row_rate:g} 行/秒；读窗宽 {job.settings.aperture_width} 列；"
+                    f"读窗高度 {job.settings.slit_rows} 行。")
+            raster = read_scan(job.strip.png, job.strip.filename)
+            reel_id = catalog.create_synthetic_reel(reel_values)
+            scan, fresh = catalog.add_scan(reel_id, raster, f"【合成测试图】{job.settings.title}", note, job.strip.recipe)
+            sidecar = dict(job.sidecar)
+            sidecar["reel_id"] = reel_id
+            sidecar["scan_id"] = scan["id"]
+            settings_bytes = json_bytes(sidecar)
+            settings_name = f"{shipment_stem(job.settings.title)}-synthetic-settings.json"
+        return jsonify(reel_id=reel_id, scan=scan, duplicate=not fresh,
+                       settings_download=f"/api/synthesis/{token}/settings.json",
+                       settings_data=encode_data(settings_bytes, "application/json"),
+                       settings_name=settings_name,
+                       image_name=job.strip.filename,
+                       image_download=f"/api/scans/{scan['id']}/original"), 201
+
+    @app.get("/api/synthesis/<token>/settings.json")
+    def synthesis_settings_file(token):
+        job = SYNTH_JOBS.get(token)
+        name = f"{shipment_stem(job.settings.title)}-synthetic-settings.json"
+        return send_content(json_bytes(job.sidecar), "application/json", name, attach=True)
 
 
 def source_routes(app, catalog, gate):
@@ -410,6 +483,7 @@ def create_app(directory=None):
     gate = ComputationGate()
     app.extensions["reeltone_catalog"] = catalog
     library_routes(app, catalog, gate)
+    synthesis_routes(app, catalog, gate)
     source_routes(app, catalog, gate)
     analysis_routes(app, catalog, gate)
     review_routes(app, catalog, gate)

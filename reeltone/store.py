@@ -276,6 +276,13 @@ class Catalog:
                     self._insert_scan(connection, reel_id, **draft)
             return self._summary_reel(connection, reel_id), created
 
+    def create_synthetic_reel(self, values):
+        """A reel holding user-generated synthetic test strips (not real scans)."""
+        with self.database(write=True) as connection:
+            reel_id, _ = self._insert_reel(connection, values["title"], values["accession"], values["gauge"],
+                                           values["note"], True, None)
+            return reel_id
+
     @staticmethod
     def _get_scan(connection, scan_id, raw=False):
         extras = ",raw" if raw else ""

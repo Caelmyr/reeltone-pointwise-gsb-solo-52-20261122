@@ -12,6 +12,10 @@ ENV PYTHONUNBUFFERED=1 \
     PORT=8000 \
     REELTONE_DATA=/var/lib/reeltone
 WORKDIR /opt/reeltone
+# DejaVu provides the glyphs burned into synthetic test-strip warning labels.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=dependencies /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY reeltone reeltone
 COPY static static
