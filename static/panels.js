@@ -1,10 +1,11 @@
 import {$, action, boxInputs, check, checked, dt, esc, field, fmt, form, image, jsonDetails, link, listTable, metrics, number, percent, readBox, record, select, span, submit, TAKE, value} from './ui.js';
-import {currentBox, currentPoint} from './film.js';
+import {currentBox, currentPoint, filmSpan} from './film.js';
 
 export const TOOL = {
     exposure:'曝光直方图', crop:'保留原像素证据', contour:'透光轮廓曲线', scope:'监听频谱', perforations:'齿孔间距',
     references:'明暗参照取样', locate:'查找光学读窗', blemish:'局部瑕疵候选', compare:'两张扫描对照',
-    sample:'原像素探针', wedge:'阶梯透射标定', splices:'横向接片候选', slit:'读窗截面漂移', pilot:'基准音稳定度',
+    sample:'原像素探针', wedge:'阶梯透射标定', splices:'横向接片候选', splice_bands:'多带横向接片',
+    slit:'读窗截面漂移', pilot:'基准音稳定度',
 };
 export const TABS = {recipe:'配方', read:'监听', tools:'巡检', retained:'记录'};
 const SIGNAL = [['width','透光宽度'],['light','平均扫描亮度']];
@@ -99,6 +100,7 @@ function toolControls(state) {
     }
     if (t === 'exposure' || t === 'crop') return mainBox;
     if (t === 'splices') return mainBox + smallFields([['window','边界一侧样本行',8,3,30,1],['contrast','最小亮度跳变',.08,.015,.9,.001],['spacing','最少间隔行',40,6,1200,1]]);
+    if (t === 'splice_bands') return bandFields(state) + smallFields([['window','边界一侧样本行',8,3,30,1],['contrast','最小亮度跳变',.08,.015,.9,.001],['max_slant','最大倾斜（行/列）',.35,.02,1.5,.01]]);
     if (t === 'blemish') return mainBox + smallFields([['contrast','局部反差',.19,.03,.92,.001],['filter_width','邻域宽度',7,3,15,2],['min_pixels','候选像素数',6,2,500,1]]);
     if (t === 'perforations') return rowsFields(rows,h) + smallFields([['pitch_hint','预估孔距',state.scan.recipe.settings.clock.pitch_guess,8,5000,.01]]);
     if (t === 'locate') return rowsFields(rows,h) + smallFields([['width_hint','预期读窗宽',state.scan.recipe.settings.aperture[1] - state.scan.recipe.settings.aperture[0],8,meta.width,1]]);
@@ -121,10 +123,13 @@ export function toolPayload(state, node) {
     const out = {recipe:state.scan.recipe.id};
     if (node.elements.namedItem('row0')) out.rows = extractRows(node);
     if (node.elements.namedItem('box0')) out.box = readBox(node,'box');
-    const numeric = ['x','y','radius','window','contrast','spacing','filter_width','min_pixels','pitch_hint','width_hint','pixels_per_mm','center_deviation','bins','frequency','window_ms','band_percent','snr'];
+    const numeric = ['x','y','radius','window','contrast','spacing','max_slant','filter_width','min_pixels','pitch_hint','width_hint','pixels_per_mm','center_deviation','bins','frequency','window_ms','band_percent','snr'];
     for (const key of numeric) {
         const item = node.elements.namedItem(key);
         if (item && item.value !== '') out[key] = Number(item.value);
+    }
+    if (tool === 'splice_bands') {
+        out.bands = [0,1,2,3].map(n=>readBox(node,`band${n}`)).filter(box=>box[2]>box[0] && box[3]>box[1]);
     }
     if (tool === 'references') {out.dark=readBox(node,'dark');out.light=readBox(node,'light');}
     if (tool === 'compare') {out.other_box=readBox(node,'other');out.other_scan=value(node,'other_scan');}
@@ -137,9 +142,27 @@ export function toolPayload(state, node) {
     return out;
 }
 
+function bandFields(state) {
+    const meta = state.scan.scan.metadata;
+    const recipe = state.scan.recipe.settings;
+    const [top, bottom] = filmSpan(state);
+    const rows = [top, bottom];
+    const picture = Math.max(recipe.aperture[1], recipe.perforations[1]);
+    const suggested = [
+        [recipe.perforations[0], rows[0], recipe.perforations[1], rows[1]],
+        [recipe.aperture[0], rows[0], recipe.aperture[1], rows[1]],
+        [picture, rows[0], Math.max(picture + 6, meta.width), rows[1]],
+        [0, 0, 0, 0],
+    ];
+    const chosen = Array.isArray(state.bands) && state.bands.length
+        ? [...state.bands, ...suggested].slice(0, 4) : suggested;
+    const fields = chosen.map((item,n)=>boxInputs(`band${n}`,item,`观察带 ${n+1}${n>2?'（选填）':''} · 胶片横向位置`)).join('');
+    return `<p class="panel-note">用两到四条横跨胶片不同横向位置的观察带找同一条接片线。证据完整的接片须由至少两条带支持，且其中一条不在画格区。各带的行范围取自当前行窗，单条带最多 2,000 行。</p>${fields}`;
+}
+
 function toolPanel(state) {
     const selectTool = select('tool','巡检工具',Object.entries(TOOL),state.tool,true);
-    const instruction = {compare:'分别指定两张扫描的对应原片范围。',wedge:'在已知透射率的参考片上分别选择三阶均匀区域。',pilot:'选择含有已知频率的参考声段。',splices:'可选取与声轨分开的片边，查找有横向支持的明暗突变。'};
+    const instruction = {compare:'分别指定两张扫描的对应原片范围。',wedge:'在已知透射率的参考片上分别选择三阶均匀区域。',pilot:'选择含有已知频率的参考声段。',splices:'可选取与声轨分开的片边，查找有横向支持的明暗突变。',splice_bands:'在片边、声轨和画格区各圈一条观察带；工具按同一斜线对齐后再判断哪些带确实看见同一处接片。'};
     return `<section class="panel"><h2>原片巡检</h2>${form('tool-form',selectTool+toolControls(state),submit('运行巡检'))}${instruction[state.tool] ? `<p class="panel-note">${esc(instruction[state.tool])}</p>` : ''}</section>`;
 }
 
@@ -178,6 +201,7 @@ function readingValue(tool, data) {
         case 'references': return [['暗参考',fmt(data.black,5)],['亮参考',fmt(data.white,5)],['透射差',fmt(data.contrast,5)]];
         case 'wedge': return [['参照阶数',data.steps.length],['拟合 γ',fmt(data.response?.gamma)],['拟合误差',fmt(data.response?.robust_error,5)]];
         case 'splices': return [['候选边界',data.candidate_count],['普通透射',fmt(data.ordinary_transmission,5)]];
+        case 'splice_bands': return [['辨认出的接片线',data.candidate_count],['证据较完整',data.corroborated_count],['有限证据',data.limited_count],['观察带',data.band_count]];
         case 'slit': return [['有效行',fmt(data.summary.used,0)],['排除行',fmt(data.summary.withheld,0)],['截面中位宽度',`${fmt(data.summary.widths.q10_q50_q90[1],2)} px`]];
         case 'pilot': return [['支持的窗口',`${data.trusted} / ${data.windows}`],['中位频率',`${fmt(data.measured_hz_q10_q50_q90?.[1],3)} Hz`],['频率偏差',`${fmt(data.frequency_drift_ppm,1)} ppm`]];
         default: return [];
@@ -191,7 +215,19 @@ export function instrumentResult(data) {
     const widgets = [data.can_retain ? action('retain-instrument','保存图像证据',{},'strong') : '',
         kind === 'references' && reading.usable ? action('use-references','用于读片配方') : ''].join('');
     const list = kind === 'locate' ? reading.candidates.map((row,n)=>record(`候选 ${n+1} · ${row.guide.join('–')} 列`, `侧向变动评分 ${fmt(row.score)}`,action('apply-track','填入读窗',{a:row.guide[0],b:row.guide[1]}))).join('') : '';
-    return `<article class="box"><h2>${TOOL[kind]}</h2>${metrics(readingValue(kind,reading))}${warnings.map(line=>`<p class="panel-note status-warning">${esc(line)}</p>`).join('')}<div class="inspect-media">${img}</div><div class="data-list">${list}</div><div class="form-footer">${widgets}</div>${jsonDetails(reading)}</article>`;
+    const bands = kind === 'splice_bands' ? reading.findings.map((line,n)=>spliceLineRecord(line,n)).join('') : '';
+    return `<article class="box"><h2>${TOOL[kind]}</h2>${metrics(readingValue(kind,reading))}${warnings.map(line=>`<p class="panel-note status-warning">${esc(line)}</p>`).join('')}<div class="inspect-media">${img}</div><div class="data-list">${list}${bands}</div><div class="form-footer">${widgets}</div>${jsonDetails(reading)}</article>`;
+}
+
+const BAND_STATE = {supported:'看见',partial:'只看见一部分',absent:'没看见',outside:'行范围外'};
+const LINE_CLASS = {corroborated:'证据较完整',single_band:'只由一条带支持',picture_only:'只在画格区'};
+function spliceLineRecord(line, n) {
+    const seen = line.observations.filter(item=>item.seen);
+    const bands = line.observations.map(item=>`带${item.index+1}${item.role==='picture'?'画格':item.role==='soundtrack'?'声轨':item.role==='perforation'?'齿孔':''}：${BAND_STATE[item.evidence_state]}`).join(' · ');
+    const rows = `${fmt(line.line_rows[0],0)} → ${fmt(line.line_rows[1],0)} 行`;
+    return record(`线 ${n+1} · ${LINE_CLASS[line.classification]}`,
+        `${seen.length}/${line.band_count} 带支持 · 原片行 ${rows} · 斜度 ${fmt(line.slope_rows_per_column,3)} 行/列 · ${bands}`,
+        action('line-to-source','回原片核对',{row:line.focus_row,col:line.focus_column}));
 }
 
 export function soundResult(report, waveform) {

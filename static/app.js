@@ -211,10 +211,11 @@ function viewProof(resultData) {
     const secondary = `/api/proofs/${info.id}/secondary.png`;
     const second = info.secondary_sha256 ? image(secondary,'配套证据图') : '';
     const parentBox = info.evidence.box || info.evidence.region;
-    const near = Array.isArray(parentBox) ? parentBox[1] : (info.evidence.source_rows?.[0] || 0);
+    const near = Number.isFinite(info.evidence.focus_row) ? info.evidence.focus_row
+        : Array.isArray(parentBox) ? parentBox[1] : (info.evidence.source_rows?.[0] || 0);
     const tools = [link(primary+'?download=1','下载证据 PNG'), info.secondary_sha256 ? link(secondary+'?download=1','下载配套 PNG') : '',
         link(`/api/proofs/${info.id}/reading.json`,'下载来源与读数 JSON'),action('take-to-source','定位来源',{id:info.scan_id,recipe:info.recipe_id,row:near})].join('');
-    modal(info.title,`<p class="panel-note ${resultData.verified?'status-good':'status-error'}">${resultData.verified?'内容和源位置校验通过。':'保存内容在校验中出现差异。'}</p><div class="inspect-media">${image(primary,'留存证据图')}${second}</div><div class="form-footer">${tools}</div>${jsonDetails(info.evidence)}${jsonDetails(resultData.integrity,'校验核对')}`);
+    return modal(info.title,`<p class="panel-note ${resultData.verified?'status-good':'status-error'}">${resultData.verified?'内容和源位置校验通过。':'保存内容在校验中出现差异。'}</p><div class="inspect-media">${image(primary,'留存证据图')}${second}</div><div class="form-footer">${tools}</div>${jsonDetails(info.evidence)}${jsonDetails(resultData.integrity,'校验核对')}`);
 }
 
 function originalJump(data) {
@@ -306,6 +307,15 @@ const commands = {
     },
     'take-to-source':originalJump,
     'open-native':originalJump,
+    'line-to-source':data=>{
+        const row=Number(data.row), column=Number(data.col);
+        const width=state.scan.scan.metadata.width, height=state.scan.scan.metadata.height;
+        state.frame.selection=[Math.max(0,column-24),Math.max(0,row-30),Math.min(width,column+24),Math.min(height,row+30)];
+        state.frame.point=[Math.min(width-1,Math.max(0,column)),Math.min(height-1,Math.max(0,row))];
+        windowStart(row-120);
+        drawSettings();
+        notice(`已回到原片第 ${row} 行附近的接片线。`);
+    },
     'apply-track':data=>{state.panel='recipe';drawSettings();$('#recipe-form').elements.a0.value=data.a;$('#recipe-form').elements.a1.value=data.b;notice('已将候选填入配方。核对列范围后保存。');},
     'use-references':()=>{const targets=state.instrumentContext?.response.reading;if(!targets?.usable) return;state.panel='recipe';drawSettings();$('#recipe-form').elements.black.value=targets.black;$('#recipe-form').elements.white.value=targets.white;},
     'retain-instrument':()=>{

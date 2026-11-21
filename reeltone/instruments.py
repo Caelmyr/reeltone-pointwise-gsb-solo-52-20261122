@@ -16,6 +16,7 @@ from .raster import encode_png
 from .spectrum import narrowband_profile
 from .sensitometry import assess_steps
 from .splices import inspect_splices
+from .splice_bands import inspect_splice_bands
 from .slit import examine_slit
 from .pilot import assay
 from .visual import (
@@ -220,6 +221,11 @@ def splice_search(material, request, catalog):
     return Result("splices", readings, plate, plot, "image")
 
 
+def splice_band_search(material, request, catalog):
+    readings, plate, plot = inspect_splice_bands(material, request)
+    return Result("splice_bands", readings, plate, plot, "image")
+
+
 def slit_geometry(material, request, catalog):
     readings, chart = examine_slit(material, request)
     return Result("slit", readings, chart, category="scope")
@@ -232,7 +238,8 @@ def test_tone(material, request, catalog):
 
 TOOLS = {"crop": crop, "exposure": exposure, "references": references, "perforations": perforations, "locate": locate,
          "blemish": blemish, "compare": compare, "sample": sample, "contour": contour, "scope": scope,
-         "wedge": exposure_wedge, "splices": splice_search, "slit": slit_geometry, "pilot": test_tone}
+         "wedge": exposure_wedge, "splices": splice_search, "splice_bands": splice_band_search,
+         "slit": slit_geometry, "pilot": test_tone}
 
 
 def run_tool(material, name, request, catalog):
