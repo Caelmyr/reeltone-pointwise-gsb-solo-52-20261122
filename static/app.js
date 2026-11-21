@@ -222,6 +222,173 @@ function originalJump(data) {
     return openScan(data.id,data.recipe || null,{workspace:true}).then(()=>windowStart(Number(data.row || 0)));
 }
 
+const GROUP_RATIOS = {side:'左右并排',stack:'上下叠放'};
+
+function scanChoices() {
+    return (state.reel?.scans || []).map((scan,n)=>[scan.id,`${String(n+1).padStart(2,'0')} · ${scan.title}`]);
+}
+
+function physicalGroupMarkup(index, scans, active) {
+    return `<fieldset class="physical-group" data-group="${index}">
+        <legend>分组 ${index+1}</legend>
+        ${field(`g${index}label`,`分组名称`,`Edge band ${index+1}`,{full:true,maxlength:65})}
+        ${select(`g${index}layout`,'纸张方向',[['portrait','A4 竖排'],['landscape','A4 横排']],'portrait')}
+        ${select(`g${index}arrange`,'裁片摆放',Object.entries(GROUP_RATIOS),'side')}
+        ${[0,1].map(slot=>`<div class="physical-slot">
+            <h4>裁片 ${slot+1} <small data-ppm-hint="${index}-${slot}" class="physical-hint"></small></h4>
+            ${select(`g${index}s${slot}scan`,'扫描',scans,scans[0]?.[0],true)}
+            ${field(`g${index}s${slot}ppm`,'每毫米像素数','',{type:'number',min:.1,step:.001})}
+            ${field(`g${index}s${slot}label`,'裁片标签',`Crop ${slot+1}`,{maxlength:65,full:true})}
+            ${boxInputs(`g${index}s${slot}box`,active)}
+        </div>`).join('')}
+        <small class="full physical-hint">填该扫描原片的每毫米像素数（不是文件内嵌 DPI）。</small>
+    </fieldset>`;
+}
+
+function openPhysical() {
+    if (!state.reel || !state.scan) throw Error('请先打开一个档案卷中的扫描。');
+    const scans = scanChoices();
+    if (scans.length < 2) throw Error('物理倍率联排需要同一档案卷内至少两张扫描。');
+    const h = state.scan.scan.metadata.height, w = state.scan.scan.metadata.width;
+    const active = state.frame.selection || [0,0,w,Math.min(h,600)];
+    const others = scans.find(item=>item[0]!==state.scan.scan.id)?.[0] || scans[0][0];
+    state.modalData = {previewed:null, lastPayload:null};
+    let content = `<p class="panel-note">每张扫描填写它的每毫米像素数；这里不使用图像内嵌 DPI。同一分组的两幅裁片同页显示，各组共用同一个实际倍率，最多两页 A4。</p>`+
+        field('title','联排名称','Physical scale proof',{full:true,maxlength:85})+
+        field('scale','出图倍率（纸面 : 原片）',1,{type:'number',min:.01,max:20,step:.001})+
+        select('groupCount','分组页数',[['1','1 页（一组）'],['2','2 页（两组）']],'1')+
+        textarea('note','联排说明','',240);
+    for (let index=0; index<2; index++) content += physicalGroupMarkup(index, scans, active);
+    content += `<div id="physical-result"></div>`;
+    modal('制作物理倍率联排', form('physical-form', content, submit('检查排版并预览')));
+    const node = $('#physical-form');
+    node.elements.namedItem('g0s0scan').value = state.scan.scan.id;
+    node.elements.namedItem('g0s1scan').value = others;
+    drawPhysicalEnabled(node);
+    node.addEventListener('change', event => {
+        if (event.target.name === 'groupCount') drawPhysicalEnabled(node);
+        const match = /^g(\d+)s(\d+)scan$/.exec(event.target.name || '');
+        if (match) { clampPhysicalBox(node, Number(match[1]), Number(match[2])); drawPhysicalPpmHint(node, Number(match[1]), Number(match[2])); }
+        state.modalData.previewed = null;
+        state.modalData.lastPayload = null;
+    });
+    for (const index of [0,1]) for (const slot of [0,1]) {
+        clampPhysicalBox(node, index, slot);
+        drawPhysicalPpmHint(node, index, slot);
+    }
+}
+
+function drawPhysicalEnabled(node) {
+    const groups = Number(value(node,'groupCount') || 1);
+    for (const fieldset of all('.physical-group',node)) {
+        const inactive = Number(fieldset.dataset.group) >= groups;
+        fieldset.hidden = inactive;
+        fieldset.disabled = inactive;
+    }
+}
+
+function drawPhysicalPpmHint(node, index, slot) {
+    const hint = $(`[data-ppm-hint="${index}-${slot}"]`,node);
+    if (!hint) return;
+    const scanId = value(node,`g${index}s${slot}scan`);
+    const scan = state.reel?.scans.find(item=>item.id===scanId);
+    const declared = scan?.metadata?.encoding?.metadata_dpi;
+    hint.textContent = declared ? `文件内嵌 ${fmt(declared[0])} dpi（仅供参考，不用于换算）` : '文件未声明 DPI；请按实测填写';
+}
+
+function clampPhysicalBox(node, index, slot) {
+    const scanId = value(node,`g${index}s${slot}scan`);
+    const meta = state.reel?.scans.find(scan=>scan.id===scanId)?.metadata;
+    if (!meta) return;
+    const prefix = `g${index}s${slot}box`;
+    const [x0,y0,x1,y1] = readBox(node,prefix);
+    const clamp = (val, lo, hi) => Math.max(lo, Math.min(hi, Math.round(val || 0)));
+    const box = [clamp(x0,0,meta.width-1), clamp(y0,0,meta.height-8),
+                 clamp(x1,1,meta.width), clamp(y1,1,meta.height)];
+    if (box[2] <= box[0]) box[2] = Math.min(meta.width, box[0] + Math.max(8, meta.width - box[0]));
+    if (box[3] <= box[1]) box[3] = Math.min(meta.height, box[1] + 8);
+    box.forEach((coord,n)=>{ node.elements.namedItem(`${prefix}${n}`).value = coord; });
+}
+
+function physicalPayload(node) {
+    if (!node) {
+        if (!state.modalData?.lastPayload || !state.modalData.previewed) throw Error('请重新检查排版并预览。');
+        if (state.modalData.lastPayload.scale !== state.modalData.previewed.requested_scale) {
+            throw Error('倍率已改动但尚未重新预览，请先检查排版。');
+        }
+        const saved = {...state.modalData.lastPayload, plan_sha256:state.modalData.previewed.plan_sha256};
+        return saved;
+    }
+    const groups = [0,1].filter(index=>!$(`fieldset[data-group="${index}"]`,node).hidden).map(index=>({
+        label:value(node,`g${index}label`), layout:value(node,`g${index}layout`), arrange:value(node,`g${index}arrange`),
+        panels:[0,1].map(slot=>({
+            scan:value(node,`g${index}s${slot}scan`), recipe:null,
+            label:value(node,`g${index}s${slot}label`), pixels_per_mm:number(node,`g${index}s${slot}ppm`),
+            box:readBox(node,`g${index}s${slot}box`), tonal:state.frame.tonal,
+        })),
+    }));
+    return {title:value(node,'title'), note:value(node,'note'), scale:number(node,'scale'), paper:'A4', groups};
+}
+
+function physicalSummary(reading) {
+    const head = reading.status === 'fits'
+        ? `<p class="panel-note status-good">${reading.pages.length} 页 A4，全部裁片按 ${esc(reading.requested_ratio)} 共用同一倍率。</p>`
+        : `<p class="panel-note status-warning">${esc(reading.message)}</p>`;
+    const rows = (reading.groups || []).map(group=>`<li>
+        <b>${esc(group.label)}</b> · ${esc(group.orientation==='portrait'?'竖排':'横排')} · ${esc(GROUP_RATIOS[group.arrange]||group.arrange)}
+        ${group.fits ? '<span class="status-good">放得下</span>' :
+            `<span class="status-error">超宽 ${fmt(group.over_mm.width)} mm，超高 ${fmt(group.over_mm.height)} mm</span>`}
+        <small>需要 ${fmt(group.required_mm[0])} × ${fmt(group.required_mm[1])} mm；可用 ${fmt(group.available_mm[0])} × ${fmt(group.available_mm[1])} mm</small>
+        <small>${group.panels.map(panel=>`${esc(panel.label)} 原片 ${fmt(panel.film_mm[0])} × ${fmt(panel.film_mm[1])} mm → 纸面 ${fmt(panel.paper_mm[0])} × ${fmt(panel.paper_mm[1])} mm`).join('　')}</small>
+    </li>`).join('');
+    return `${head}<ul class="physical-report">${rows}</ul>`;
+}
+
+function physicalPreview(answer) {
+    const reading = answer.reading;
+    state.modalData.previewed = reading;
+    const pages = (answer.previews || []).map((src,index)=>`<figure class="physical-page">${image(src,`物理联排第 ${index+1} 页`)}<figcaption>第 ${index+1} 页 · ${esc(reading.pages[index].size_mm[0])} × ${esc(reading.pages[index].size_mm[1])} mm</figcaption></figure>`).join('');
+    const footer = `<div class="form-footer">${action('physical-print','确认排版并生成 PDF',{},'strong')}</div>`;
+    modal('物理倍率联排预览', physicalSummary(reading) + `<div class="physical-pages">${pages}</div>` + footer + jsonDetails(reading,'查看每幅裁片的纸面位置与倍率'));
+}
+
+function physicalConflict(answer) {
+    const reading = answer.reading;
+    state.modalData.previewed = null;
+    const groups = (reading.groups || []).filter(group=>!group.fits).map(group=>
+        `<li><b>${esc(group.label)}</b>（${esc(GROUP_RATIOS[group.arrange]||group.arrange)}，${esc(group.orientation==='portrait'?'竖排':'横排')}）需 ${fmt(group.required_mm[0])} × ${fmt(group.required_mm[1])} mm，可用只有 ${fmt(group.available_mm[0])} × ${fmt(group.available_mm[1])} mm；超出 ${fmt(group.over_mm.width)} × ${fmt(group.over_mm.height)} mm。</li>`).join('');
+    const remedy = reading.status === 'conflict' && reading.max_scale
+        ? `<p class="panel-note">同一排版可完整放入的最大等比倍率是 <b>${esc(reading.max_ratio)}</b>（${fmt(reading.max_scale,3)}×）。确认后按这个倍率重新预览，再下载。</p>
+           <div class="form-footer">${action('physical-shrink','按 '+reading.max_ratio+' 重新预览',{scale:reading.max_scale})}${action('physical-back','返回修改排版')}</div>`
+        : `<p class="panel-note status-error">${esc(reading.message)}</p>`;
+    modal('排不下，先看冲突', `<p class="panel-note status-warning">${esc(reading.message)}</p><ul class="physical-report">${groups}</ul>${remedy}` +
+        `<p class="panel-note">也可以改纸张方向、改成上下叠放，或缩小原片框后重新检查。</p>` + jsonDetails(reading,'查看冲突读数'));
+}
+
+function reopenPhysicalModal(payload) {
+    openPhysical();
+    const node = $('#physical-form');
+    if (!node || !payload) return;
+    const groups = payload.groups || [];
+    groups.forEach((group,index)=>{
+        const set = (name,val)=>{ const elm=node.elements.namedItem(name); if(elm) elm.value=val; };
+        set(`g${index}label`,group.label); set(`g${index}layout`,group.layout); set(`g${index}arrange`,group.arrange);
+        (group.panels||[]).forEach((panel,slot)=>{
+            set(`g${index}s${slot}scan`,panel.scan); set(`g${index}s${slot}label`,panel.label);
+            set(`g${index}s${slot}ppm`,panel.pixels_per_mm);
+            (panel.box||[]).forEach((coord,n)=>set(`g${index}s${slot}box${n}`,coord));
+        });
+    });
+    set_field(node,'title',payload.title); set_field(node,'note',payload.note); set_field(node,'scale',payload.scale);
+    const count = node.elements.namedItem('groupCount'); if (count) count.value = String(Math.max(1,groups.length));
+    drawPhysicalEnabled(node);
+}
+
+function set_field(node, name, val) {
+    const elm = node.elements.namedItem(name);
+    if (elm && val !== undefined && val !== null) elm.value = val;
+}
+
 function openContact() {
     const w = state.scan.scan.metadata.width,h=state.scan.scan.metadata.height;
     const active = currentBox(state);
@@ -245,8 +412,7 @@ function jumpCue(id, edit) {
 }
 
 const commands = {
-    'load-demo':async () => {
-        const response=await post('/api/training');
+    'load-demo':async () => {        const response=await post('/api/training');
         state.library=await request('/api/library');
         state.workspace='scan';
         await openReel(response.training[0].reel.id);
@@ -314,6 +480,30 @@ const commands = {
         modal('保存巡检证据',form('proof-form',field('title','证据名称',TOOL[tool],{full:true,maxlength:90})+textarea('note','备注','',650),submit('保存图像证据')));
     },
     'contact':openContact,
+    'physical':openPhysical,
+    'physical-back':()=>reopenPhysicalModal(state.modalData?.lastPayload),
+    'physical-shrink':async data=>{
+        const suggested = state.modalData?.lastPayload;
+        if (!suggested) { notice('请重新打开物理倍率联排。',true); return; }
+        const payload = {...suggested, scale:Number(data.scale)};
+        delete payload.plan_sha256;
+        const answer = await post(reelURL(state.reel.reel.id,'/physical-plan'),payload);
+        state.modalData.lastPayload = payload;
+        if (answer.reading.status === 'fits') physicalPreview(answer);
+        else physicalConflict(answer);
+    },
+    'physical-print':async ()=>{
+        if (!state.modalData?.previewed) throw Error('请先检查排版并预览可用倍率。');
+        const payload = physicalPayload(null);
+        const answer = await post(reelURL(state.reel.reel.id,'/physical-print'),payload);
+        const reading = answer.reading;
+        if (reading.status !== 'fits' || !answer.pdf) { physicalConflict(answer); return; }
+        const pages = (answer.previews || []).map((src,index)=>`<figure class="physical-page">${image(src,`物理联排第 ${index+1} 页`)}<figcaption>第 ${index+1} 页 · ${esc(reading.pages[index].size_mm[0])} × ${esc(reading.pages[index].size_mm[1])} mm</figcaption></figure>`).join('');
+        modal('物理倍率联排可以下载', physicalSummary(reading) + `<div class="physical-pages">${pages}</div>` +
+            `<div class="form-footer">${link(answer.pdf,'下载物理倍率 PDF',{download:'physical-scale-proof.pdf',css:'strong'})}${link(answer.previews[0],'下载第 1 页 PNG',{download:'physical-scale-page-1.png'})}${answer.previews[1]?link(answer.previews[1],'下载第 2 页 PNG',{download:'physical-scale-page-2.png'}):''}</div>` +
+            jsonDetails(reading,'查看 PDF 摘要与每幅裁片位置'));
+        notice('已生成物理倍率 PDF；打印时请按 100% 实际大小，不要选“适合页面”。');
+    },
     'open-ab':()=>{
         const takes=state.takes.map(take=>[take.id,take.title]);
         modal('A/B 监听核对',form('ab-form',select('a','监听 A（左）',takes,takes[0][0])+select('b','监听 B（右）',takes,takes[1][0])+
@@ -367,6 +557,13 @@ const submitters = {
         notice(next.created?`已保存配方 v${next.recipe.seq}。`:`设置与 v${next.recipe.seq} 相同。`);
     },
     'listen-form':node=>retainTake(node,false),
+    'physical-form':async node=>{
+        if (!node.reportValidity()) return;
+        const answer = await post(reelURL(state.reel.reel.id,'/physical-plan'),physicalPayload(node));
+        state.modalData.lastPayload = physicalPayload(node);
+        if (answer.reading.status === 'fits') physicalPreview(answer);
+        else physicalConflict(answer);
+    },
     'tool-form':async node=>{
         const scan=state.scan.scan.id;
         const kind=state.tool;

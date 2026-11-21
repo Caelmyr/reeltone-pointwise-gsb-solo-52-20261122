@@ -20,6 +20,7 @@ from .instruments import TOOLS, run_tool
 from .intake_batch import BATCH_BYTES, inspect_upload
 from .listen_pair import retained_pair
 from .packet import MAX_PACKET_BYTES, json_bytes, verify_packet
+from .printscale import plan_physical, render_physical
 from .raster import FILE_BYTES, MAX_HEIGHT, MAX_PIXELS, MAX_WIDTH, query_box, read_scan
 from .recipe import Recipe
 from .replay import retained_replay
@@ -248,6 +249,27 @@ def source_routes(app, catalog, gate):
                        pdf=encode_data(compiled.pdf, "application/pdf"))
 
 
+def print_routes(app, catalog, gate):
+    @app.post("/api/reels/<reel_id>/physical-plan")
+    def physical_plan(reel_id):
+        values = json_body()
+        with gate.work():
+            manifest, previews = plan_physical(catalog, reel_id, values)
+        return jsonify(reading=manifest, previews=[encode_data(item, "image/png") for item in previews])
+
+    @app.post("/api/reels/<reel_id>/physical-print")
+    def physical_print(reel_id):
+        values = json_body()
+        with gate.work():
+            manifest, previews, pdf = render_physical(catalog, reel_id, values)
+        if pdf is None:
+            # Not a protocol error: the requested magnification does not fit and
+            # the manifest carries the conflicts and the largest usable ratio.
+            return jsonify(reading=manifest, previews=[], pdf=None)
+        return jsonify(reading=manifest, previews=[encode_data(item, "image/png") for item in previews],
+                       pdf=encode_data(pdf, "application/pdf"))
+
+
 def analysis_routes(app, catalog, gate):
     @app.post("/api/scans/<scan_id>/audition")
     def listen(scan_id):
@@ -411,6 +433,7 @@ def create_app(directory=None):
     app.extensions["reeltone_catalog"] = catalog
     library_routes(app, catalog, gate)
     source_routes(app, catalog, gate)
+    print_routes(app, catalog, gate)
     analysis_routes(app, catalog, gate)
     review_routes(app, catalog, gate)
 

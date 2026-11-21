@@ -52,7 +52,7 @@ export function filmPage(state) {
     const view = state.scan.recipe;
     const caption = `${scan.metadata.width} 列 × ${fmt(scan.metadata.height,0)} 行`;
     const tools = [action('technical','技术资料'),link(scanURL(scan.id,'/original'),'下载原始扫描'),action('toggle-tonal',state.frame.tonal === 'native' ? '拉伸显示' : '原始亮度')].join('');
-    const nav = `${action('window-form','定位行窗')}${action('clear-selection','清除框选')}${action('save-marker','保存定位框')}${action('contact','制作联排')}`;
+    const nav = `${action('window-form','定位行窗')}${action('clear-selection','清除框选')}${action('save-marker','保存定位框')}${action('contact','制作联排')}${action('physical','物理倍率联排')}`;
     const missingPane = state.scan.is_latest ? '' : `<p class="panel-note status-warning">当前正在打开读片历史 v${view.seq}，最新配方为 v${state.scan.latest}。</p>`;
     const output = state.result || {html:''};
     return `<header class="scene-header"><div><h1>${esc(scan.title)}</h1><div class="scene-sub"><span>${esc(state.reel.reel.gauge)}</span><span>${esc(caption)}</span><span>${scan.metadata.bit_depth} 位</span><span>配方 v${view.seq}</span></div></div><div class="scene-actions">${tools}</div></header>${missingPane}${terrain(state)}<div class="selection-tools">${nav}</div><section id="result-slot" aria-label="工具结果">${output.html}</section>`;

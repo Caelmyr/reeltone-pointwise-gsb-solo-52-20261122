@@ -206,3 +206,21 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   .playqueue { overflow-x: auto; }
   .playlist-item { min-width: 480px; }
 }
+
+/* Physical-scale proof sheets */
+.physical-group { border: 1px solid #3a4c5b; border-radius: 8px; padding: 9px 10px 11px; margin: 10px 0 0; min-width: 0; }
+.physical-group[hidden] { display: none; }
+.physical-group legend { padding: 0 5px; color: #cfe2e0; font-size: 12px; font-weight: 650; }
+.physical-group .fields { margin-top: 2px; }
+.physical-slot { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px 9px; padding: 8px; border: 1px dashed #344855; border-radius: 6px; }
+.physical-slot h4 { grid-column: 1 / -1; margin: 0; font-size: 12px; color: var(--muted); font-weight: 620; }
+.physical-slot .box-row { grid-column: 1 / -1; }
+.physical-slot .field.full { grid-column: 1 / -1; }
+.physical-hint { grid-column: 1 / -1; }
+.physical-report { margin: 6px 0 10px; padding-left: 18px; display: grid; gap: 7px; font-size: 12px; line-height: 1.5; }
+.physical-report b { color: var(--ink); }
+.physical-report small { display: block; color: var(--muted); }
+.physical-pages { display: grid; grid-template-columns: repeat(auto-fit,minmax(230px,1fr)); gap: 10px; margin: 8px 0 4px; align-items: start; }
+.physical-page { margin: 0; padding: 7px; background: #0f1922; border: 1px solid #374b57; border-radius: 7px; }
+.physical-page img { display: block; width: 100%; height: auto; border: 1px solid #52646b; background: #fff; }
+.physical-page figcaption { padding-top: 5px; color: var(--muted); font-size: 11px; }
